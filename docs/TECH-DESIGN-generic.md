@@ -51,6 +51,14 @@ ProjectInit/Replace/Rollback                     ProjectInit/Replace/Rollback
     "bootstrapPatch": {                             // bootstrap 写入（含障眼法）
       "spring.cloud.nacos.config.server-addr": "{configCenterAddr}",
       "spring.application.name": "application-localdebug"
+    },
+    "extraApplicationPatch": {                      // H2 dubbo 键组 + 清空动作（P1 批次2）
+      "dubbo.provider.tag": "{tag}",
+      "dubbo.consumer.lazy": true,
+      "dubbo.registry.register-mode": "all",
+      "dubbo.protocol.port": "{rpcPort}",
+      "management": null,                           // null = 写入 null 移除键（与 middleware-patches 语义一致）
+      "server.port": ""
     }
   },
   "dyeing": {                                       // 染色：header → 实例标签（调研§5 同构模型）

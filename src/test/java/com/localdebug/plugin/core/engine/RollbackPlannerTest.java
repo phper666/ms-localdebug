@@ -33,9 +33,10 @@ class RollbackPlannerTest {
 
         List<String> plan = planner.plan(builtin, context);
 
+        // 模板带尾随空格（保持与旧 createKtCtlCmdFile 字符串逐字节一致）
         assertEquals(List.of(
-                "ktctl -d -n ns-a recover svc-a",
-                "ktctl -d -n ns-a clean"
+                "ktctl -d -n ns-a recover svc-a ",
+                "ktctl -d -n ns-a clean "
         ), plan);
     }
 
@@ -57,6 +58,6 @@ class RollbackPlannerTest {
 
         List<String> plan = planner.plan(builtin, context);
 
-        assertEquals("ktctl -d -n ns-a recover ", plan.get(0));
+        assertEquals("ktctl -d -n ns-a recover  ", plan.get(0));
     }
 }

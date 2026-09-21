@@ -19,7 +19,15 @@
       "spring.application.name": "application-localdebug"
     },
     "importCheckKey": "spring.cloud.nacos.config.import-check.enabled",
-    "importCheckValue": false
+    "importCheckValue": false,
+    "extraApplicationPatch": {
+      "dubbo.provider.tag": "{tag}",
+      "dubbo.consumer.lazy": true,
+      "dubbo.registry.register-mode": "all",
+      "dubbo.protocol.port": "{rpcPort}",
+      "management": null,
+      "server.port": ""
+    }
   },
 
   "routingEnabler": {
@@ -46,8 +54,8 @@
       "connect": "ktctl -d -n {ns} connect",
       "mesh":    "ktctl -d -n {ns} mesh {svc} --expose {port}:8080 --versionMark tag:{tag}",
       "preview": "ktctl -d -n {ns} preview {alias} --expose {rpcPort}:{rpcPort}",
-      "recover": "ktctl -d -n {ns} recover {svc}",
-      "clean":   "ktctl -d -n {ns} clean"
+      "recover": "ktctl -d -n {ns} recover {svc} ",
+      "clean":   "ktctl -d -n {ns} clean "
     },
     "stopMechanism": "signal-file",
     "rollbackActions": ["recover", "clean"]

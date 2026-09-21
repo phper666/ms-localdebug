@@ -95,6 +95,12 @@ public class StackDescriptor {
         private Map<String, String> bootstrapPatch;
         private String importCheckKey;
         private Boolean importCheckValue;
+        /**
+         * 额外 application 侧补丁（H2 dubbo 键组 + 清空动作收编）：
+         * 值支持 "{tag}" 模板串（占位符替换）/ 静态 true/false/数字 / null（写入 null 移除键，
+         * 与 middleware-patches 的 null 语义一致）
+         */
+        private Map<String, Object> extraApplicationPatch;
     }
 
     @Data

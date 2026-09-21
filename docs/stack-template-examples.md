@@ -27,7 +27,15 @@
       "spring.application.name": "application-localdebug"
     },
     "importCheckKey": "spring.cloud.nacos.config.import-check.enabled",
-    "importCheckValue": false
+    "importCheckValue": false,
+    "extraApplicationPatch": {              // H2 dubbo 键组 + 清空动作收编（P1 批次2 新增）
+      "dubbo.provider.tag": "{tag}",
+      "dubbo.consumer.lazy": true,
+      "dubbo.registry.register-mode": "all",
+      "dubbo.protocol.port": "{rpcPort}",
+      "management": null,                   // null = 写入 null 移除键，与 middleware-patches 语义一致
+      "server.port": ""                     // 清空动作，让 profile patch 接管
+    }
   },
 
   "routingEnabler": {
@@ -54,8 +62,8 @@
       "connect": "ktctl -d -n {ns} connect",
       "mesh":    "ktctl -d -n {ns} mesh {svc} --expose {port}:8080 --versionMark tag:{tag}",
       "preview": "ktctl -d -n {ns} preview {alias} --expose {rpcPort}:{rpcPort}",
-      "recover": "ktctl -d -n {ns} recover {svc}",
-      "clean":   "ktctl -d -n {ns} clean"
+      "recover": "ktctl -d -n {ns} recover {svc} ",
+      "clean":   "ktctl -d -n {ns} clean "
     },
     "stopMechanism": "signal-file",
     "rollbackActions": ["recover", "clean"]

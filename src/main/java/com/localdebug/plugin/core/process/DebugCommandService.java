@@ -3,29 +3,23 @@ package com.localdebug.plugin.core.process;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.components.Service;
 import com.intellij.openapi.project.Project;
+import com.localdebug.plugin.core.bridge.KtConnectBridge;
+import com.localdebug.plugin.core.bridge.ProxyBridge;
 import com.localdebug.plugin.core.constant.Constants;
-import com.localdebug.plugin.core.util.DirectoryUtil;
-import com.localdebug.plugin.core.util.LogOutputUtil;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.InputStreamReader;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 /**
- * 调试命令（ktctl）进程服务（headless）
- * 从 .localdebug.ktctl.cmds 解析命令，负责进程启动/停止/信号文件管理。
+ * 调试命令（ktctl）进程服务（headless）——facade 角色：
+ * 进程管理已收敛进 {@link ProxyBridge}（实现① KtConnectBridge，信号文件停止语义），
+ * 本服务保留项目级生命周期（dispose → stopAll）与 .localdebug.ktctl.cmds 解析，公开方法签名不变（UI 兼容）。
  *
  * 单例选择说明：使用 @Service(Service.Level.PROJECT) 项目级服务而不是 project.getUserData，
  * IDEA 自动随项目关闭调用 dispose()，无需手动 Disposer 注册；通过 project.getService() 获取。
@@ -42,8 +36,7 @@ public final class DebugCommandService implements Disposable {
         return project.getService(DebugCommandService.class);
     }
 
-    private final Map<String, Process> runningProcesses = new ConcurrentHashMap<>();
-    private final Map<String, String> runningCommandContents = new ConcurrentHashMap<>();
+    private final ProxyBridge bridge = new KtConnectBridge();
 
     /**
      * 命令条目（解析自 .localdebug.ktctl.cmds）
@@ -129,169 +122,46 @@ public final class DebugCommandService implements Disposable {
      * 是否有运行中的进程
      */
     public boolean hasRunningProcesses() {
-        return runningProcesses.values().stream().anyMatch(p -> p != null && p.isAlive());
+        return bridge.hasRunningProcesses();
     }
 
     /**
      * 指定命令是否运行中
      */
     public boolean isRunning(String commandName) {
-        Process process = runningProcesses.get(commandName);
-        return process != null && process.isAlive();
+        return bridge.isRunning(commandName);
     }
 
     /**
      * 运行中进程信息（供 UI 查询）
      */
     public List<String> getRunningProcessesInfo() {
-        List<String> result = new ArrayList<>();
-        for (Map.Entry<String, Process> entry : runningProcesses.entrySet()) {
-            Process process = entry.getValue();
-            if (process != null && process.isAlive()) {
-                result.add(entry.getKey() + " (PID: " + process.pid() + ")");
-            }
-        }
-        return result;
+        return bridge.getRunningProcessesInfo();
     }
 
     /**
      * 在项目目录启动命令（若已在运行则先停止再重启）
      */
-    public synchronized void start(String projectPath, CommandEntry entry, Consumer<String> logger) {
-        String name = entry.getDisplayName();
-        if (isRunning(name)) {
-            LogOutputUtil.log(logger, "命令 '" + name + "' 正在运行中，先停止后重新启动");
-            stop(name, logger);
-        }
-        try {
-            LogOutputUtil.log(logger, "正在启动命令: " + name + ", 命令内容: " + entry.getCommand() + ", 应用名称: " + entry.getAppName());
-            String[] cmdArray = entry.getCommand().trim().split("\\s+");
-            ProcessBuilder processBuilder = new ProcessBuilder(cmdArray);
-            processBuilder.directory(new File(projectPath));
-            processBuilder.redirectErrorStream(true);
-            Process process = processBuilder.start();
-            runningProcesses.put(name, process);
-            runningCommandContents.put(name, entry.getCommand());
-            startOutputReader(process, name, logger);
-            LogOutputUtil.log(logger, "命令已启动，PID: " + process.pid());
-        } catch (Exception ex) {
-            LogOutputUtil.error(logger, "启动命令时发生错误: " + ex.getMessage());
-        }
+    public void start(String projectPath, CommandEntry entry, Consumer<String> logger) {
+        bridge.start(entry.getDisplayName(), entry.getCommand(), projectPath, logger);
     }
 
     /**
      * 停止命令：优先写信号文件（ktctl-*-signal-<pid> 内容 "stop"），失败则 destroy
      */
-    public synchronized void stop(String commandName, Consumer<String> logger) {
-        Process process = runningProcesses.get(commandName);
-        if (process == null) {
-            LogOutputUtil.log(logger, "命令 '" + commandName + "' 当前未运行");
-            return;
-        }
-        try {
-            LogOutputUtil.log(logger, "正在终止命令 '" + commandName + "'");
-            boolean signalSent = sendStopSignal(String.valueOf(process.pid()), runningCommandContents.get(commandName), logger);
-            if (!signalSent) {
-                process.destroy();
-            }
-            Thread waitThread = new Thread(() -> {
-                try {
-                    boolean finished = process.waitFor(20, TimeUnit.SECONDS);
-                    if (!finished) {
-                        LogOutputUtil.log(logger, "命令 '" + commandName + "' 清理超时，将强制终止");
-                        process.destroyForcibly();
-                        process.waitFor(2, TimeUnit.SECONDS);
-                    }
-                } catch (Exception ex) {
-                    LogOutputUtil.error(logger, "等待命令终止时发生错误: " + ex.getMessage());
-                }
-            });
-            waitThread.setDaemon(true);
-            waitThread.start();
-        } catch (Exception ex) {
-            LogOutputUtil.error(logger, "终止命令时发生错误: " + ex.getMessage());
-        }
+    public void stop(String commandName, Consumer<String> logger) {
+        bridge.stop(commandName, logger);
     }
 
     /**
      * 停止全部运行中进程（项目关闭时调用）
      */
-    public synchronized void stopAll() {
-        for (String name : new ArrayList<>(runningProcesses.keySet())) {
-            try {
-                stop(name, null);
-            } catch (Exception e) {
-                log.error("停止进程失败: {}", name, e);
-            }
-        }
+    public void stopAll() {
+        bridge.stopAll();
     }
 
     @Override
     public void dispose() {
         stopAll();
-    }
-
-    private void startOutputReader(Process process, String commandName, Consumer<String> logger) {
-        Thread readerThread = new Thread(() -> {
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    if (logger != null) {
-                        logger.accept(line);
-                    }
-                }
-                int exitCode = process.waitFor();
-                runningProcesses.remove(commandName);
-                runningCommandContents.remove(commandName);
-                LogOutputUtil.log(logger, "命令 '" + commandName + "' 已终止，退出码: " + exitCode);
-            } catch (Exception e) {
-                runningProcesses.remove(commandName);
-                runningCommandContents.remove(commandName);
-                LogOutputUtil.error(logger, "读取命令输出时发生错误: " + e.getMessage());
-            }
-        });
-        readerThread.setDaemon(true);
-        readerThread.start();
-    }
-
-    /**
-     * 根据命令内容和 PID 生成信号文件名
-     */
-    private static String getSignalFileName(String commandContent, String pid) {
-        if (commandContent == null) {
-            return null;
-        }
-        if (commandContent.contains("connect")) {
-            return "ktctl-connect-signal-" + pid;
-        } else if (commandContent.contains("mesh")) {
-            return "ktctl-mesh-signal-" + pid;
-        } else if (commandContent.contains("exchange")) {
-            return "ktctl-exchange-signal-" + pid;
-        } else if (commandContent.contains("preview")) {
-            return "ktctl-preview-signal-" + pid;
-        }
-        return null;
-    }
-
-    /**
-     * 写信号文件发送停止信号（ktctl 约定：信号文件内容 "stop"）
-     */
-    private static boolean sendStopSignal(String pid, String commandContent, Consumer<String> logger) {
-        String signalFileName = getSignalFileName(commandContent, pid);
-        if (signalFileName == null) {
-            LogOutputUtil.error(logger, "不支持的命令类型，无法生成信号文件名");
-            return false;
-        }
-        try {
-            DirectoryUtil.ensureSignalFilesDirExists();
-            Path signalFile = Paths.get(DirectoryUtil.getSignalFilesDir().toString(), signalFileName);
-            Files.write(signalFile, "stop".getBytes(StandardCharsets.UTF_8));
-            LogOutputUtil.log(logger, "成功发送停止信号到进程，信号文件: " + signalFile);
-            return true;
-        } catch (Exception e) {
-            LogOutputUtil.error(logger, "发送停止信号时发生错误: " + e.getMessage());
-            return false;
-        }
     }
 }

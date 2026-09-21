@@ -74,6 +74,7 @@ public class ConfigManager {
         try {
             String json = ResourceUtil.readUtf8Str("com/localdebug/plugin/core/config.json");
             if (StrUtil.isNotBlank(json)) {
+                // TODO(P3): H5 工具下载 URL 内置值清空（留空引导首次配置），当前保留旧默认值保行为等价
                 return GSON.fromJson(json, Config.class);
             }
         } catch (Exception e) {

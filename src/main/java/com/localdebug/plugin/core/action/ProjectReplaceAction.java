@@ -13,8 +13,12 @@ import com.localdebug.plugin.core.config.JvmParametersConfig;
 import com.localdebug.plugin.core.config.LocalDebugConfig;
 import com.localdebug.plugin.core.config.ReplaceConfig;
 import com.localdebug.plugin.core.constant.Constants;
+import com.localdebug.plugin.core.engine.DescriptorLoader;
+import com.localdebug.plugin.core.engine.DescriptorValidator;
+import com.localdebug.plugin.core.engine.RegistryPatchApplier;
 import com.localdebug.plugin.core.model.Dependency;
 import com.localdebug.plugin.core.model.FilePath;
+import com.localdebug.plugin.core.model.StackDescriptor;
 import com.localdebug.plugin.core.util.InternalFileUtil;
 import com.localdebug.plugin.core.util.JsonFileUtil;
 import com.localdebug.plugin.core.util.LogOutputUtil;
@@ -23,8 +27,11 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.function.Consumer;
 
 import static com.localdebug.plugin.core.constant.Constants.DEFAULT_DUBBO_PORT;
@@ -37,6 +44,10 @@ import static com.localdebug.plugin.core.constant.Constants.QUERY_BOOTSTRAP_YAML
  */
 @Slf4j
 public class ProjectReplaceAction implements Action {
+
+    private final DescriptorLoader descriptorLoader = new DescriptorLoader();
+    private final DescriptorValidator descriptorValidator = new DescriptorValidator();
+    private StackDescriptor descriptor;
 
     /**
      * 执行替换配置操作
@@ -52,6 +63,14 @@ public class ProjectReplaceAction implements Action {
         File projectDir = new File(projectPath);
         if (!projectDir.exists() || !projectDir.isDirectory()) {
             LogOutputUtil.error(logger, "项目目录不存在或不是有效目录");
+            return;
+        }
+
+        // 加载并校验栈描述符（描述符错误 = 新式静默失败，必须早暴露）
+        this.descriptor = descriptorLoader.load(null);
+        List<String> descViolations = descriptorValidator.validate(descriptor);
+        if (!descViolations.isEmpty()) {
+            LogOutputUtil.error(logger, "栈描述符校验失败: " + String.join("; ", descViolations));
             return;
         }
 
@@ -125,9 +144,11 @@ public class ProjectReplaceAction implements Action {
                 try {
                     // 获取nacos上应用的配置
                     String applicationConfig = getApplicationConfig(aliYunConfig, replaceConfig);
-                    // 替换阿里云ram角色
+                    // 替换阿里云ram角色（M3：producers 路径读描述符 middlewareGroup.producersKey）
                     JSONObject jsonObject = InternalFileUtil.getYamlByContent(applicationConfig);
-                    Object producers = jsonObject.getByPath("churchill.rocketmq.producers");
+                    String producersKey = descriptor.getMiddlewareGroup() != null
+                            ? descriptor.getMiddlewareGroup().getProducersKey() : "churchill.rocketmq.producers";
+                    Object producers = jsonObject.getByPath(producersKey);
                     if (ObjectUtil.isNotEmpty(producers)) {
                         JSONArray producersArray = (JSONArray) producers;
                         List<ALiYunConfig.Producers> newProducers = new ArrayList<>();
@@ -148,7 +169,7 @@ public class ProjectReplaceAction implements Action {
                             }
                             newProducers.add(item);
                         }
-                        jsonObject.putByPath("churchill.rocketmq.producers", newProducers);
+                        jsonObject.putByPath(producersKey, newProducers);
                     }
                     jsonObject = deepMergeJsonObjects(jsonObject, replaceConfig.getProjectApplicationConfig());
                     createOrUpdateProjectNewYaml(jsonObject, replaceConfig.getConfigDir() + File.separator + QUERY_APPLICATION_YAML);
@@ -180,6 +201,7 @@ public class ProjectReplaceAction implements Action {
                 log.warn("ramRole 未配置，跳过 ${mainServiceRamRoleName} 占位符替换");
                 return applicationConfig;
             }
+            // TODO(P2): M5 占位符表数据化——${mainServiceRamRoleName} 替换仍为硬编码，待 middleware patches 挂 requires 声明后收编
             return applicationConfig.replaceAll("\\$\\{mainServiceRamRoleName\\}", aliYunConfig.getRamRole());
         }
         return null;
@@ -189,84 +211,160 @@ public class ProjectReplaceAction implements Action {
         String newLine = "\r\n";
         String ktCtlCmdFilePath = projectBasePath + File.separator + Constants.LOCAL_DEBUG_KTCTL_CMD_CONFIG_NAME;
 
-        String namespace = localDebugConfig.getReplaceConfigs().get(0).getK8sServiceNamespace();
+        // 旧行为：connect 用第一个 replaceConfig 的命名空间（所有 connect 共用）
+        String connectNamespace = localDebugConfig.getReplaceConfigs().get(0).getK8sServiceNamespace();
         List<String> ktCtlCmds = new LinkedList<>();
         ktCtlCmds.add(newLine);
-
         for (ReplaceConfig replaceConfig : localDebugConfig.getReplaceConfigs()) {
-            ktCtlCmds.add("# enable proxy, -d 显示调试日志, -n value 指定目标服务的Kubernetes Namespace");
-            ktCtlCmds.add("##ktconnect代理###" + replaceConfig.getAppName());
-            ktCtlCmds.add(String.format("ktctl -d -n %s connect", namespace));
-            ktCtlCmds.add(newLine);
-
-            String k8sServiceName = replaceConfig.getK8sServiceName();
-            if (ObjectUtil.isEmpty(k8sServiceName)) {
-                k8sServiceName = "<请填写服务名>";
-            }
-            String k8sServiceNamespace = replaceConfig.getK8sServiceNamespace();
-            if (ObjectUtil.isEmpty(k8sServiceNamespace)) {
-                k8sServiceNamespace = "<请填写服务命名空间>";
-            }
-            if (replaceConfig.getServiceType().equals(Constants.BFF)) {
-                ktCtlCmds.add("# proxy http request, ktctl mesh <目标服务名> --expose <本地端口>:<目标服务端口>");
-                ktCtlCmds.add("##接口流量拦截代理###" + replaceConfig.getAppName());
-                ktCtlCmds.add(String.format("ktctl -d -n %s mesh %s --expose %s:8080 --versionMark tag:%s",
-                        k8sServiceNamespace, k8sServiceName, replaceConfig.getBffWebServerPort(), replaceConfig.getTag()));
-                ktCtlCmds.add(newLine);
-
-                // BFF的服务有可能跟rpc服务在同一个项目
-                ktCtlCmds.add("# proxy rpc request, ktctl preview <新建服务名> --expose <本地端口>:<新建服务端口> ");
-                ktCtlCmds.add("##rpc流量拦截代理###" + replaceConfig.getAppName());
-                String alias = k8sServiceName + "-" + replaceConfig.getTag();
-                ktCtlCmds.add(String.format("ktctl -d -n %s preview %s --expose %s:%s",
-                        k8sServiceNamespace, alias, DEFAULT_DUBBO_PORT, DEFAULT_DUBBO_PORT));
-                ktCtlCmds.add(newLine);
-            } else if (replaceConfig.getServiceType().equals(Constants.RPC)) {
-                ktCtlCmds.add("# proxy rpc request, ktctl preview <新建服务名> --expose <本地端口>:<新建服务端口> ");
-                ktCtlCmds.add("##rpc流量拦截代理###" + replaceConfig.getAppName());
-                String alias = k8sServiceName + "-" + replaceConfig.getTag();
-                ktCtlCmds.add(String.format("ktctl -d -n %s preview %s --expose %s:%s",
-                        k8sServiceNamespace, alias, DEFAULT_DUBBO_PORT, DEFAULT_DUBBO_PORT));
-                ktCtlCmds.add(newLine);
-            }
-            ktCtlCmds.add("# ktctl -d -n [命名空间] recover [服务名]");
-            ktCtlCmds.add("##清理流量拦截###" + replaceConfig.getAppName());
-            ktCtlCmds.add(String.format("ktctl -d -n %s recover %s ", k8sServiceNamespace, k8sServiceName));
-            ktCtlCmds.add(newLine);
-            ktCtlCmds.add("# ktctl -d -n [命名空间] clean");
-            ktCtlCmds.add("##清理集群里已超期KT代理容器###" + replaceConfig.getAppName());
-            ktCtlCmds.add(String.format("ktctl -d -n %s clean ", k8sServiceNamespace));
-            ktCtlCmds.add(newLine);
+            ktCtlCmds.addAll(buildKtctlCmdFileLines(descriptor, replaceConfig, connectNamespace));
         }
         FileUtil.writeUtf8String(String.join(newLine, ktCtlCmds), ktCtlCmdFilePath);
     }
 
+    /**
+     * M8：ktctl 命令文件行生成（描述符 proxy.templates 展开，保留旧分段格式与命令顺序）。
+     * 命令内容与改造前 createKtCtlCmdFile 逐行一致（含注释分段行与 recover/clean 尾随空格）。
+     *
+     * @param connectNamespace connect 命令使用的命名空间（旧行为：全项目取第一个 replaceConfig 的 ns）
+     */
+    public static List<String> buildKtctlCmdFileLines(StackDescriptor desc, ReplaceConfig rc, String connectNamespace) {
+        String newLine = "\r\n";
+        Map<String, String> templates = desc.getProxy() != null ? desc.getProxy().getTemplates() : null;
+        List<String> lines = new LinkedList<>();
+
+        lines.add("# enable proxy, -d 显示调试日志, -n value 指定目标服务的Kubernetes Namespace");
+        lines.add("##ktconnect代理###" + rc.getAppName());
+        Map<String, Object> connectCtx = new HashMap<>();
+        connectCtx.put("ns", connectNamespace);
+        lines.add(expandTemplate(templates, "connect", connectCtx));
+        lines.add(newLine);
+
+        String k8sServiceName = ObjectUtil.isEmpty(rc.getK8sServiceName()) ? "<请填写服务名>" : rc.getK8sServiceName();
+        String k8sServiceNamespace = ObjectUtil.isEmpty(rc.getK8sServiceNamespace()) ? "<请填写服务命名空间>" : rc.getK8sServiceNamespace();
+        String alias = k8sServiceName + "-" + rc.getTag();
+        if (Constants.BFF.equals(rc.getServiceType())) {
+            lines.add("# proxy http request, ktctl mesh <目标服务名> --expose <本地端口>:<目标服务端口>");
+            lines.add("##接口流量拦截代理###" + rc.getAppName());
+            Map<String, Object> meshCtx = new HashMap<>();
+            meshCtx.put("ns", k8sServiceNamespace);
+            meshCtx.put("svc", k8sServiceName);
+            meshCtx.put("port", rc.getBffWebServerPort());
+            meshCtx.put("tag", rc.getTag());
+            lines.add(expandTemplate(templates, "mesh", meshCtx));
+            lines.add(newLine);
+
+            // BFF的服务有可能跟rpc服务在同一个项目
+            lines.add("# proxy rpc request, ktctl preview <新建服务名> --expose <本地端口>:<新建服务端口> ");
+            lines.add("##rpc流量拦截代理###" + rc.getAppName());
+            lines.add(expandTemplate(templates, "preview", previewCtx(k8sServiceNamespace, alias)));
+            lines.add(newLine);
+        } else if (Constants.RPC.equals(rc.getServiceType())) {
+            lines.add("# proxy rpc request, ktctl preview <新建服务名> --expose <本地端口>:<新建服务端口> ");
+            lines.add("##rpc流量拦截代理###" + rc.getAppName());
+            lines.add(expandTemplate(templates, "preview", previewCtx(k8sServiceNamespace, alias)));
+            lines.add(newLine);
+        }
+        lines.add("# ktctl -d -n [命名空间] recover [服务名]");
+        lines.add("##清理流量拦截###" + rc.getAppName());
+        Map<String, Object> recoverCtx = new HashMap<>();
+        recoverCtx.put("ns", k8sServiceNamespace);
+        recoverCtx.put("svc", k8sServiceName);
+        lines.add(expandTemplate(templates, "recover", recoverCtx));
+        lines.add(newLine);
+        lines.add("# ktctl -d -n [命名空间] clean");
+        lines.add("##清理集群里已超期KT代理容器###" + rc.getAppName());
+        Map<String, Object> cleanCtx = new HashMap<>();
+        cleanCtx.put("ns", k8sServiceNamespace);
+        lines.add(expandTemplate(templates, "clean", cleanCtx));
+        lines.add(newLine);
+        return lines;
+    }
+
+    private static Map<String, Object> previewCtx(String k8sServiceNamespace, String alias) {
+        Map<String, Object> ctx = new HashMap<>();
+        ctx.put("ns", k8sServiceNamespace);
+        ctx.put("alias", alias);
+        ctx.put("rpcPort", DEFAULT_DUBBO_PORT);
+        return ctx;
+    }
+
+    private static String expandTemplate(Map<String, String> templates, String name, Map<String, Object> context) {
+        String template = templates == null ? null : templates.get(name);
+        if (template == null) {
+            log.warn("proxy.templates 缺少模板: {}", name);
+            return "";
+        }
+        return RegistryPatchApplier.resolveTemplate(template, context);
+    }
+
     private void createRunApplicationAgentFile(String projectBasePath, LocalDebugConfig localDebugConfig, ALiYunConfig aliYunConfig) {
         String jvmRcFilePath = projectBasePath + File.separator + Constants.LOCAL_DEBUG_JVMRC_CONFIG_NAME;
-
-        List<JvmParametersConfig> list = new ArrayList<>();
-        for (ReplaceConfig replaceConfig : localDebugConfig.getReplaceConfigs()) {
-            JvmParametersConfig jvmParameters = new JvmParametersConfig();
-            jvmParameters.setMainClass(replaceConfig.getAppMainClass());
-            String nacosServerAddr = removeProtocolAndPort(aliYunConfig.getNacosServerAddr());
-            String mqAddr = removeProtocolAndPort(aliYunConfig.getMqAddr());
-            String jvmArgs = localDebugConfig.getJvmArgs() + " -Dhttp.nonProxyHosts=" + nacosServerAddr + "|" + nacosServerAddr.toLowerCase();
-            // mqAddr 可选：缺失时跳过 mq 地址 nonProxyHosts 配置，避免空值拼接/NPE
-            if (ObjectUtil.isNotEmpty(mqAddr)) {
-                jvmArgs += "|" + mqAddr + "|" + mqAddr.toLowerCase()
-                        + "|" + mqAddr.replace("_", "-")
-                        + "|" + mqAddr.toLowerCase().replace("_", "-");
-            } else {
-                log.warn("mqAddr 未配置，跳过 mq 地址 nonProxyHosts 配置");
-            }
-            String alias = replaceConfig.getK8sServiceName() + "-" + replaceConfig.getTag();
-            jvmParameters.setJvmArgs(jvmArgs + String.format(" -DDUBBO_IP_TO_REGISTRY=%s.%s.svc.cluster.local", alias, replaceConfig.getK8sServiceNamespace()));
-            list.add(jvmParameters);
-        }
+        List<JvmParametersConfig> list = buildJvmParametersList(descriptor, localDebugConfig.getReplaceConfigs(), localDebugConfig.getJvmArgs(), aliYunConfig);
         FileUtil.writeUtf8String(JSONUtil.toJsonStr(JSONUtil.parseArray(list), 2), jvmRcFilePath);
     }
 
-    private String removeProtocolAndPort(String url) {
+    /**
+     * M8：jvmrc 参数列表生成（描述符 routingEnabler 驱动），文件内容与改造前逐项一致
+     */
+    public static List<JvmParametersConfig> buildJvmParametersList(StackDescriptor desc, List<ReplaceConfig> replaceConfigs,
+                                                                   String baseJvmArgs, ALiYunConfig aliYunConfig) {
+        List<JvmParametersConfig> list = new ArrayList<>();
+        for (ReplaceConfig replaceConfig : replaceConfigs) {
+            JvmParametersConfig jvmParameters = new JvmParametersConfig();
+            jvmParameters.setMainClass(replaceConfig.getAppMainClass());
+            jvmParameters.setJvmArgs(buildJvmArgs(desc, replaceConfig, baseJvmArgs, aliYunConfig));
+            list.add(jvmParameters);
+        }
+        return list;
+    }
+
+    /**
+     * jvmArgs 生成：`-Dhttp.nonProxyHosts=<nonProxyHosts> -D<rpcRegistryEnvVar>=<rpcRegistryIpTemplate 展开>`
+     */
+    public static String buildJvmArgs(StackDescriptor desc, ReplaceConfig rc, String baseJvmArgs, ALiYunConfig aliYunConfig) {
+        Map<String, Object> nonProxyCtx = new HashMap<>();
+        nonProxyCtx.put("configCenterAddr", removeProtocolAndPort(aliYunConfig.getNacosServerAddr()));
+        nonProxyCtx.put("mqAddr", removeProtocolAndPort(aliYunConfig.getMqAddr()));
+        String nonProxyHosts = buildNonProxyHosts(desc, nonProxyCtx);
+
+        Map<String, Object> registryCtx = new HashMap<>();
+        registryCtx.put("svc", rc.getK8sServiceName());
+        registryCtx.put("tag", rc.getTag());
+        registryCtx.put("ns", rc.getK8sServiceNamespace());
+        String registryIp = RegistryPatchApplier.resolveTemplate(desc.getRoutingEnabler().getRpcRegistryIpTemplate(), registryCtx);
+
+        return baseJvmArgs + " -Dhttp.nonProxyHosts=" + nonProxyHosts
+                + String.format(" -D%s=%s", desc.getRoutingEnabler().getRpcRegistryEnvVar(), registryIp);
+    }
+
+    /**
+     * nonProxyHosts 生成（保持旧格式）：首源 2 变体（raw|lower），其余源 4 变体（raw|lower|dash|lower-dash）；空源跳过
+     */
+    public static String buildNonProxyHosts(StackDescriptor desc, Map<String, Object> context) {
+        List<String> sources = desc.getRoutingEnabler() != null ? desc.getRoutingEnabler().getNonProxyHostsSources() : null;
+        StringBuilder sb = new StringBuilder();
+        boolean first = true;
+        if (sources != null) {
+            for (int i = 0; i < sources.size(); i++) {
+                String value = RegistryPatchApplier.resolveTemplate(sources.get(i), context);
+                if (ObjectUtil.isEmpty(value)) {
+                    continue;
+                }
+                if (!first) {
+                    sb.append("|");
+                }
+                sb.append(value).append("|").append(value.toLowerCase(Locale.ROOT));
+                if (i > 0) {
+                    sb.append("|").append(value.replace("_", "-"))
+                            .append("|").append(value.toLowerCase(Locale.ROOT).replace("_", "-"));
+                }
+                first = false;
+            }
+        }
+        return sb.toString();
+    }
+
+    public static String removeProtocolAndPort(String url) {
         if (url == null || url.isEmpty()) {
             return url;
         }
