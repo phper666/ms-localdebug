@@ -1,0 +1,32 @@
+{
+  "application": {
+    "name": "LocalDebug",
+    "author": {
+      "name": "localdebug",
+      "email": ""
+    }
+  },
+  "base": {
+    "appearance": {
+      "fontName": "Microsoft YaHei UI",
+      "fontSize": 12,
+      "theme": "default",
+      "language": "zh_CN",
+      "useGlobalFont": true
+    },
+    "debug": {
+      "kubectl": {
+        "downloadUrl": "https://dl.k8s.io/release/v1.30.14/bin/windows/amd64/kubectl.exe"
+      },
+      "ktconnect": {
+        "downloadUrl": ""
+      },
+      "projectPaths": []
+    },
+    "update": {
+      "updateUrl": "",
+      "autoCheckUpdate": true,
+      "continueCheckingUpdates": true
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "jvmArgs": "-DsocksProxyHost=127.0.0.1 -DsocksProxyPort=2223 ",
+  "updateDependencies" : [
+    {"groupId":"com.phper666", "artifactId":"rocketmqModule", "version":"dev-debug"},
+    {"groupId":"com.phper666", "artifactId":"hedwig-event-sdk-core", "version":"dev-debug"},
+    {"groupId":"com.phper666", "artifactId":"hedwig-event-sdk-rocketmq", "version":"dev-debug"},
+    {"groupId":"com.phper666", "artifactId":"hedwig-event-sdk-inmemory", "version":"dev-debug"},
+    {"groupId":"com.phper666", "artifactId":"hedwig-event-sdk-mq", "version":"dev-debug"},
+    {"groupId":"com.phper666", "artifactId":"hedwig-event-sdk-spring-boot-starter", "version":"dev-debug"},
+    {"groupId":"com.phper666", "artifactId":"hedwig-event-sdk-mq-spring-boot-starter", "version":"dev-debug"},
+    {"groupId":"com.phper666", "artifactId":"hedwig-rqueue-sender-starter", "version":"dev-debug"},
+    {"groupId":"com.phper666", "artifactId":"hedwig-rqueue-receiver-starter", "version":"dev-debug"},
+    {"groupId":"com.phper666", "artifactId":"hedwig-event-sdk-annotation-driven", "version":"dev-debug"}
+  ],
+  "addDependencies": [
+    {"groupId":"com.aliyun.openservices", "artifactId":"ons-client", "version":"2.0.6.Final"}
+  ]
+}

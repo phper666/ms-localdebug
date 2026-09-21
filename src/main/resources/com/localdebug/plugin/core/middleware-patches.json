@@ -1,0 +1,36 @@
+{
+  "common": {
+    "churchill.rocketmq.default-config.addr": "${mqAddr}",
+    "churchill.rocketmq.default-config.ram-role": null,
+    "churchill.rocketmq.default-config.access-key": "${stsAccessKey}",
+    "churchill.rocketmq.default-config.secret-key": "${stsSecretKey}",
+    "churchill.rocketmq.default-config.security-token": "${stsSecurityToken}",
+    "churchill.rocketmq.consumers": "${mqConsumers}",
+    "churchill.event.rocketmq.ramRole": null,
+    "churchill.event.rocketmq.nameSrvAddr": "${mqAddr}",
+    "churchill.event.rocketmq.accessKey": "${stsAccessKey}",
+    "churchill.event.rocketmq.secretKey": "${stsSecretKey}",
+    "churchill.event.rocketmq.securityToken": "${stsSecurityToken}",
+    "churchill.scheduler.acs.ram-role": null,
+    "churchill.scheduler.acs.role-arn": "${roleArn}",
+    "churchill.scheduler.acs.access-key-id": "${accessKey}",
+    "churchill.scheduler.acs.access-key-secret": "${secretKey}",
+    "churchill.scheduler.acs.region": "cn-hangzhou",
+    "churchill.scheduler.group-id": "${schedulerGroupId}",
+    "churchill.scheduler.app-key": "${schedulerAppKey}",
+    "churchill.scheduler.appKey": null,
+    "churchill.scheduler.region": "public",
+    "churchill.scheduler.endpoint": "acm.aliyun.com",
+    "churchill.scheduler.namespace": "${schedulerNamespace}",
+    "alicloud.kms.type": "sts_access",
+    "alicloud.kms.ram-role-name": "${roleArn}",
+    "alicloud.kms.access-key-id": "${accessKey}",
+    "alicloud.kms.access-key-secret": "${secretKey}"
+  },
+  "bff": {
+    "server.port": "${bffWebServerPort}"
+  },
+  "rpc": {
+    "server.port": "${rpcWebServerPort}"
+  }
+}

@@ -1,0 +1,36 @@
+<!-- Plugin Configuration File. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
+<idea-plugin require-restart="false">
+    <!-- P2: id 泛化为 com.localdebug.plugin；name 保持 ms-localdebug 不变，避免市场冲突 -->
+    <id>com.localdebug.plugin</id>
+
+    <name>ms-localdebug</name>
+
+    <!-- P2: vendor 泛化，url 为 github placeholder -->
+    <vendor url="https://github.com/phper666/ms-localdebug">phper666</vendor>
+
+    <description>
+        <![CDATA[Microservice local debugging plugin for IntelliJ IDEA. Automatically injects JVM arguments and environment variables into Java run configurations, manages ktctl (kt-connect) proxy lifecycle, and handles project config init/replace/rollback for debugging Kubernetes-hosted microservices locally.]]></description>
+
+    <!-- Product and plugin compatibility requirements.
+         Read more: https://plugins.jetbrains.com/docs/intellij/plugin-compatibility.html -->
+    <depends>com.intellij.modules.platform</depends>
+<!--    <depends>com.intellij.modules.lang</depends>-->
+    <depends>com.intellij.modules.java</depends>
+    <depends>org.jetbrains.plugins.terminal</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <java.programPatcher implementation="com.localdebug.plugin.RunApplicationAgent"/>
+
+        <!-- toolWindow id 由「工具集合」改为更通用的「LocalDebug」；secondary:true表示设置在tool window bar最下方 -->
+        <toolWindow id="LocalDebug" anchor="right"
+                    factoryClass="com.localdebug.plugin.ui.MainToolWindowFactory" secondary="true"/>
+
+        <!-- 设置页：阿里云配置（AK/SK 走 PasswordSafe）+ K8s kubeconfig -->
+        <applicationConfigurable id="com.localdebug.plugin.settings"
+                                 displayName="LocalDebug 微服务调试"
+                                 instance="com.localdebug.plugin.ui.settings.LocalDebugSettingsConfigurable"/>
+    </extensions>
+    <actions>
+
+    </actions>
+</idea-plugin>

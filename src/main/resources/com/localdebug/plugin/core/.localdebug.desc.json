@@ -1,0 +1,46 @@
+{
+  "jvmArgs": "本地服务启动时，jvm可以附加的参数",
+  "updateDependencies" : [
+    {"groupId":"父pom.xml要更新依赖版本的groupId", "artifactId":"父pom.xml要更新依赖版本的artifactId", "version":"父pom.xml要更新依赖版本的的版本号"}
+  ],
+  "addDependencies": [
+    {"groupId":"父pom.xml要添加依赖版本的groupId", "artifactId":"父pom.xml要添加依赖版本的artifactId", "version":"父pom.xml要添加依赖版本的的版本号"}
+  ],
+  "projectBootstrapConfig": {
+    "spring.cloud.nacos.config.server-addr": "nacos的公网地址，会自动去替换bootstrap.yaml下的配置",
+    "spring.cloud.nacos.config.group": "nacos服务的分组，默认填写localdebug即可，会自动去替换bootstrap.yaml下的配置"
+  },
+  "projectApplicationConfig": {
+    "spring.application.name": "自动生成,应用的名称+tag组合，会自动去替换application.yaml下的配置",
+    "spring.cloud.nacos.discovery.ip": "服务发现注册的ip，使用k8s的dns解析，填写为： K8sServiceName(调试本地服务k8s的服务名称,默认使用boostrap.yaml中的application.name,须人工确认(登录阿里云控制台,k8s集群->网络->服务,选择命名空间查找服务名称)) + K8sServiceNamespace(调试本地服务的k8s命名空间,登录阿里云可以查看) + .svc.cluster.local",
+    "spring.cloud.nacos.discovery.port": "服务发现注册的端口，默认为80即可",
+    "dubbo.provider.tag": "整个链路的tag,很重要,默认使用系统登录用户名(如果有特殊字符,会进行替换,满足k8s规范),这样可以保证大家没有冲突",
+    "dubbo.consumer.lazy": "默认为true即可",
+    "management": "可以默认为null，为null时默认移除该配置",
+    "server.port": "本地调试服务的启动的web端口号",
+    "churchill.scheduler.group-id": "scheduler的分组id",
+    "churchill.scheduler.app-key": "scheduler的app key",
+    "churchill.rocketmq.default-config.addr": "rocketMq的公网地址，rocket如果通过grpc或者tcp则无法通过kt-connect代理去访问，所以需要公网域名或者ip,jvm走代理时会忽略这个域名或者ip",
+    "churchill.rocketmq.default-config.consumers.group-id": "rocketMq消费订阅的分组id,是个数组",
+    "churchill.rocketmq.default-config.ram-role": "为null即可，会默认去掉这个参数",
+    "churchill.rocketmq.default-config.access-key": "rocketMq的ak，rocket没有通过代理去请求，所以无法通过ram的方式去请求",
+    "churchill.rocketmq.default-config.secret-key": "rocketMq的sk，rocket没有通过代理去请求，所以无法通过ram的方式去请求"
+  },
+  "replaceConfigs": [
+    {
+      "appName": "自动生成,应用的名称",
+      "appMainClass": "应用启动类路径",
+      "rNacosGroup": "自动生成,随便取一个分组,防止拉取nacos上的配置覆盖了你本地的,记得去掉括号提示内容",
+      "nacosGroup": "自动拉取bootstrap.yaml nacos的group",
+      "nacosDataId": "根据appName自动生成{appName}.yaml,如果有误则人工修改一下",
+      "nacosNamespaceId": "自动拉取bootstrap.yaml nacos的namespaceId，可以登录阿里云查看",
+      "tag": "整个链路的tag,很重要,默认使用系统登录用户名(如果有特殊字符,会进行替换,满足k8s规范),这样可以保证大家没有冲突",
+      "configDir": "自动生成",
+      "k8sServiceNamespace": "调试本地服务的k8s命名空间,登录阿里云可以查看",
+      "k8sServiceName": "调试本地服务k8s的服务名称,默认使用boostrap.yaml中的application.name,须人工确认(登录阿里云控制台,k8s集群->网络->服务,选择命名空间查找服务名称)",
+      "serviceType": "调试本地服务的类型,支持bff和rpc",
+      "bffWebServerPort": "本地调试服务的启动的web端口号,会自动把本地的application.yaml配置进行替换",
+      "dubboWebServerPort": "本地调试服务的启动的web端口号,会自动把本地的application.yaml配置进行替换,有写provider依赖了web的模块"
+    }
+  ]
+}

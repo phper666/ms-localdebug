@@ -1,0 +1,507 @@
+package com.localdebug.plugin.core.action;
+
+import cn.hutool.core.io.FileUtil;
+import cn.hutool.core.util.ObjectUtil;
+import cn.hutool.core.util.RuntimeUtil;
+import cn.hutool.core.util.StrUtil;
+import cn.hutool.json.JSONConfig;
+import cn.hutool.json.JSONObject;
+import cn.hutool.json.JSONUtil;
+import com.aliyun.sts20150401.models.AssumeRoleResponseBody;
+import com.localdebug.plugin.core.cloud.ALiYunClient;
+import com.localdebug.plugin.core.config.ALiYunConfig;
+import com.localdebug.plugin.core.config.ALiYunTemporaryCredentials;
+import com.localdebug.plugin.core.config.LocalDebugConfig;
+import com.localdebug.plugin.core.config.ReplaceConfig;
+import com.localdebug.plugin.core.config.SpringBootConfig;
+import com.localdebug.plugin.core.constant.Constants;
+import com.localdebug.plugin.core.model.FilePath;
+import com.localdebug.plugin.core.model.K8sServiceItems;
+import com.localdebug.plugin.core.util.DirectoryUtil;
+import com.localdebug.plugin.core.util.EnvUtil;
+import com.localdebug.plugin.core.util.InternalFileUtil;
+import com.localdebug.plugin.core.util.LogOutputUtil;
+import com.localdebug.plugin.core.util.MiddlewarePatchUtil;
+import com.localdebug.plugin.core.util.PortUtil;
+import lombok.extern.slf4j.Slf4j;
+
+import java.io.File;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Consumer;
+
+import static com.localdebug.plugin.core.constant.Constants.BFF;
+import static com.localdebug.plugin.core.constant.Constants.CLASS_RESOURCE_CONFIG;
+import static com.localdebug.plugin.core.constant.Constants.CLASS_RESOURCE_DESC_CONFIG;
+import static com.localdebug.plugin.core.constant.Constants.CLASS_RESOURCE_NACOS_NAMESPACE_MAP;
+import static com.localdebug.plugin.core.constant.Constants.DEFAULT_DUBBO_PORT;
+import static com.localdebug.plugin.core.constant.Constants.LOCAL_DEBUG_DESC_CONFIG_NAME;
+import static com.localdebug.plugin.core.constant.Constants.QUERY_BOOTSTRAP_YAML;
+import static com.localdebug.plugin.core.constant.Constants.RPC;
+
+/**
+ * 初始化配置操作类
+ * 处理项目初始化配置相关的功能
+ */
+@Slf4j
+public class ProjectInitAction implements Action {
+    private final JSONObject nacosNamespaceJsonObj = InternalFileUtil.getPluginResourcesConfig(CLASS_RESOURCE_NACOS_NAMESPACE_MAP);
+
+    /**
+     * 执行初始化配置操作
+     *
+     * @param projectPath     项目路径
+     * @param projectBackPath 项目备份路径
+     * @param logger          日志输出回调
+     */
+    @Override
+    public void execute(String projectPath, String projectBackPath, Consumer<String> logger) {
+        LogOutputUtil.log(logger, "开始执行初始化配置操作...");
+
+        // 检查项目目录是否存在
+        File projectDir = new File(projectPath);
+        if (!projectDir.exists() || !projectDir.isDirectory()) {
+            LogOutputUtil.error(logger, "项目目录不存在或不是有效目录");
+            return;
+        }
+
+        ALiYunConfig aliYunConfig = InternalFileUtil.getGlobalProjectMqConfig();
+        ALiYunTemporaryCredentials tempCredentials = InternalFileUtil.getGlobalALiYunTemporaryCredentials();
+
+        // 获取临时AK/SK凭证
+        try {
+            updateTemporaryCredentialsIfNeeded(aliYunConfig, tempCredentials, logger);
+            // 重新加载配置以确保获取最新的临时凭证
+            tempCredentials = InternalFileUtil.getGlobalALiYunTemporaryCredentials();
+        } catch (Exception e) {
+            LogOutputUtil.error(logger, "获取临时AK/SK凭证失败: " + e.getMessage());
+            return;
+        }
+
+        if (!aliYunConfig.isValidConfig()) {
+            LogOutputUtil.error(logger, "阿里云配置不能有空配置，请先填写阿里云配置信息");
+            return;
+        }
+
+        // 生成localdebug和desc文件
+        String projectLocalDebugConfigPath = projectPath + File.separator + Constants.LOCAL_DEBUG_CONFIG_NAME;
+        String projectLocalDebugDescConfigPath = projectPath + File.separator + LOCAL_DEBUG_DESC_CONFIG_NAME;
+        InternalFileUtil.pluginConfigCopyToProjectConfig(CLASS_RESOURCE_CONFIG, projectLocalDebugConfigPath);
+        InternalFileUtil.pluginConfigCopyToProjectConfig(CLASS_RESOURCE_DESC_CONFIG, projectLocalDebugDescConfigPath);
+
+        LocalDebugConfig localDebugConfig = InternalFileUtil.getLocalDebugConfig(projectLocalDebugConfigPath);
+        List<String> searchConfigFilePaths = getProjectConfigPaths(projectPath);
+        List<ReplaceConfig> replaceConfigs = new ArrayList<>();
+        List<FilePath> rollbackFilePaths = new ArrayList<>();
+        // 生成k8s所有命名空间下的services
+        Map<String, List<String>> namespaceServiceMap = generateK8sServiceConfigFile(projectPath);
+        if (namespaceServiceMap.isEmpty()) {
+            LogOutputUtil.error(logger, "获取k8s命名空间下的服务名称失败. 请使用cmd执行一下命名看看是否有输出: kubectl get services --all-namespaces -l control-by!=kt -o=json，如果有输出，则是idea加载环境变量有问题，需要关闭idea重新打开，如果有使用到toolbox，则需要关闭idea和toolbox，重新在toolbox打开idea");
+            return;
+        }
+
+        boolean existsProjectConfigBackFile = existsProjectConfigBackFile(projectBackPath);
+        for (String searchConfigFilePath : searchConfigFilePaths) {
+            File searchConfigFile = new File(searchConfigFilePath);
+            try {
+                // 备份项目中所有有关的application.yaml、bootstrap.yaml文件，用于回滚
+                if (!existsProjectConfigBackFile) {
+                    String encryptPath = InternalFileUtil.createProjectConfigBackDirName(searchConfigFile);
+                    String backFilePath = projectBackPath + File.separator + encryptPath + File.separator + searchConfigFile.getName();
+                    backFilePath = FileUtil.normalize(backFilePath);
+                    FilePath filePath = new FilePath();
+                    filePath.setOriginalPath(searchConfigFilePath);
+                    filePath.setBackPath(backFilePath);
+                    rollbackFilePaths.add(filePath);
+                    FileUtil.copy(searchConfigFilePath, backFilePath, false);
+                    LogOutputUtil.log(logger, "searchConfigFilePath: " + searchConfigFilePath + ", backFilePath: " + backFilePath);
+                }
+            } catch (Exception e) {
+                LogOutputUtil.error(logger, "init config error: " + e);
+                return;
+            }
+
+            // 根据文件识别应用名称，并追加localdebug文件
+            ReplaceConfig replaceConfig = new ReplaceConfig();
+            // tag 取值：.localdebug.json 的 debugTag 字段优先，否则取 OS 用户名
+            replaceConfig.setTag(StrUtil.isNotBlank(localDebugConfig.getDebugTag())
+                    ? localDebugConfig.getDebugTag()
+                    : EnvUtil.getUsernameAsTag());
+            String projectRunApplication = InternalFileUtil.getProjectRunApplicationFilePackage(new File(new File(searchConfigFile.getParent()).getParent() + "/java"), "");
+            replaceConfig.setAppMainClass(projectRunApplication);
+            // 使用新的端口管理器获取项目端口
+            int[] projectPorts = PortUtil.getPortsForProject(projectPath);
+            replaceConfig.setBffWebServerPort(projectPorts[0]);
+            replaceConfig.setRpcWebServerPort(projectPorts[1]);
+            replaceConfig.setRNacosGroup("localdebug");
+            replaceConfig.setConfigDir(FileUtil.normalize(searchConfigFile.getParent()));
+
+            SpringBootConfig springBootConfig;
+            if (existsProjectConfigBackFile) {
+                String backFilePath = getProjectConfigBackPathByFileName(projectBackPath, InternalFileUtil.createProjectConfigBackDirName(searchConfigFile) + File.separator + searchConfigFile.getName());
+                springBootConfig = InternalFileUtil.getProjectYaml(backFilePath);
+            } else {
+                springBootConfig = InternalFileUtil.getProjectYaml(searchConfigFilePath);
+            }
+
+            if (Objects.isNull(springBootConfig) || ObjectUtil.isEmpty(springBootConfig.getApplication())) {
+                LogOutputUtil.error(logger, "*.yaml parsing error, Please check if there are spring.application.name and spring.cloud.nacos.config");
+                continue;
+            }
+            if (searchConfigFile.getName().equals(QUERY_BOOTSTRAP_YAML)) {
+                JSONObject projectBootstrapConfig = new JSONObject(JSONConfig.create().setIgnoreNullValue(false));
+                projectBootstrapConfig.putByPath("spring.cloud.nacos.config.server-addr", aliYunConfig.getNacosServerAddr());
+                projectBootstrapConfig.putByPath("spring.application.name", "application-localdebug");
+                replaceConfig.setProjectBootstrapConfig(projectBootstrapConfig);
+            }
+
+            Optional<SpringBootConfig> optionalSpringBootConfig = Optional.of(springBootConfig);
+            JSONObject projectApplicationConfig = new JSONObject(JSONConfig.create().setIgnoreNullValue(false));
+            if (optionalSpringBootConfig.map(SpringBootConfig::getConfig).map(SpringBootConfig.Config::getImportValue).orElse(null) != null) {
+                projectApplicationConfig.putByPath("spring.cloud.nacos.config.import-check.enabled", false);
+            }
+
+            replaceConfig.setAppName(optionalSpringBootConfig.map(SpringBootConfig::getApplication).map(SpringBootConfig.Application::getName).orElse(null));
+            if (ObjectUtil.isEmpty(replaceConfig.getAppName())) {
+                LogOutputUtil.error(logger, "spring.application.name cannot be empty");
+                return;
+            }
+            setReplaceConfig(replaceConfig, optionalSpringBootConfig, namespaceServiceMap, projectPath);
+            projectApplicationConfig.putByPath("spring.application.name", replaceConfig.getAppName() + "-" + replaceConfig.getTag());
+            projectApplicationConfig.putByPath("spring.cloud.nacos.discovery.ip", replaceConfig.getK8sServiceName() + "." + replaceConfig.getK8sServiceNamespace() + ".svc.cluster.local");
+            projectApplicationConfig.putByPath("spring.cloud.nacos.discovery.port", 80);
+            projectApplicationConfig.putByPath("dubbo.provider.tag", replaceConfig.getTag());
+            projectApplicationConfig.putByPath("dubbo.consumer.lazy", true);
+            projectApplicationConfig.putByPath("dubbo.registry.register-mode", "all");
+            projectApplicationConfig.putByPath("dubbo.protocol.port", DEFAULT_DUBBO_PORT);
+            projectApplicationConfig.putByPath("management", null);
+            projectApplicationConfig.putByPath("server.port", "");
+
+            // 中间件相关 yaml patch（churchill.rocketmq.* / churchill.scheduler.* / alicloud.kms.* / server.port）
+            // 数据化存放于 classpath: middleware-patches.json，由通用 patch 应用器遍历执行
+            Map<String, Object> patchContext = buildPatchContext(aliYunConfig, tempCredentials, replaceConfig);
+            MiddlewarePatchUtil.applyPatches(projectApplicationConfig, replaceConfig.getServiceType(), patchContext);
+
+            replaceConfig.setProjectApplicationConfig(projectApplicationConfig);
+            if (ObjectUtil.isEmpty(replaceConfig.getAppName())) {
+                replaceConfig.setAppName(optionalSpringBootConfig.map(SpringBootConfig::getApplication).map(SpringBootConfig.Application::getName).orElse(""));
+            }
+
+            replaceConfigs.add(replaceConfig);
+        }
+
+        if (!replaceConfigs.isEmpty()) {
+            localDebugConfig.setReplaceConfigs(replaceConfigs);
+
+            FileUtil.writeUtf8String(JSONUtil.parseObj(localDebugConfig, false).toJSONString(2), projectLocalDebugConfigPath);
+        }
+
+        if (!rollbackFilePaths.isEmpty()) {
+            FileUtil.writeUtf8String(JSONUtil.parseArray(rollbackFilePaths).toJSONString(2), projectBackPath + File.separator + Constants.ROLLBACK_FILE_PATHS_NAME);
+        }
+
+        // 初始化git的忽略文件
+        checkProjectGitignore(projectPath);
+
+        LogOutputUtil.log(logger, "初始化配置成功！");
+    }
+
+    private Map<String, Object> buildPatchContext(ALiYunConfig aliYunConfig, ALiYunTemporaryCredentials tempCredentials, ReplaceConfig replaceConfig) {
+        Map<String, Object> context = new HashMap<>();
+        context.put("mqAddr", aliYunConfig.getMqAddr());
+        context.put("roleArn", aliYunConfig.getRoleArn());
+        context.put("accessKey", aliYunConfig.getAccessKey());
+        context.put("secretKey", aliYunConfig.getSecretKey());
+        context.put("schedulerNamespace", aliYunConfig.getSchedulerNamespace());
+        context.put("schedulerGroupId", aliYunConfig.getSchedulerGroupId());
+        context.put("schedulerAppKey", aliYunConfig.getSchedulerAppKey());
+        context.put("mqConsumers", aliYunConfig.getMqConsumers());
+        context.put("stsAccessKey", tempCredentials.getStsAccessKey());
+        context.put("stsSecretKey", tempCredentials.getStsSecretKey());
+        context.put("stsSecurityToken", tempCredentials.getStsSecurityToken());
+        context.put("bffWebServerPort", replaceConfig.getBffWebServerPort());
+        context.put("rpcWebServerPort", replaceConfig.getRpcWebServerPort());
+        return context;
+    }
+
+    /**
+     * 检查并更新临时凭证（如果需要）
+     */
+    private void updateTemporaryCredentialsIfNeeded(ALiYunConfig aliYunConfig, ALiYunTemporaryCredentials tempCredentials, Consumer<String> logger) throws Exception {
+        // 检查是否需要更新临时凭证（不存在或已过期）
+        if (!isTemporaryCredentialsValid(tempCredentials)) {
+            LogOutputUtil.log(logger, "正在获取临时AK/SK凭证...");
+
+            // 调用阿里云接口获取临时凭证
+            AssumeRoleResponseBody.AssumeRoleResponseBodyCredentials credentials = ALiYunClient.getAssumeRoleCredentials(
+                    aliYunConfig.getAccessKey(),
+                    aliYunConfig.getSecretKey(),
+                    aliYunConfig.getStsAkSkDurationSeconds(),
+                    aliYunConfig.getRoleArn(),
+                    EnvUtil.getUsername()
+            );
+
+            if (credentials != null) {
+                // 创建新的临时凭证对象
+                ALiYunTemporaryCredentials newTempCredentials = new ALiYunTemporaryCredentials();
+                newTempCredentials.setStsAccessKey(credentials.getAccessKeyId());
+                newTempCredentials.setStsSecretKey(credentials.getAccessKeySecret());
+                newTempCredentials.setStsSecurityToken(credentials.getSecurityToken());
+
+                // 将UTC时间转换为本地时间格式存储
+                String utcExpiration = credentials.getExpiration();
+                try {
+                    Instant instant = Instant.parse(utcExpiration);
+                    ZoneId zoneId = ZoneId.systemDefault();
+                    LocalDateTime localDateTime = LocalDateTime.ofInstant(instant, zoneId);
+                    DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+                    newTempCredentials.setStsTokenExpiration(localDateTime.format(formatter));
+                } catch (Exception e) {
+                    // 如果转换失败，仍然存储原始UTC时间
+                    newTempCredentials.setStsTokenExpiration(utcExpiration);
+                }
+
+                // 保存更新后的临时凭证
+                InternalFileUtil.saveGlobalALiYunTemporaryCredentials(newTempCredentials);
+
+                LogOutputUtil.log(logger, "临时AK/SK凭证获取成功");
+            } else {
+                throw new RuntimeException("获取临时AK/SK凭证失败");
+            }
+        } else {
+            LogOutputUtil.log(logger, "临时AK/SK凭证有效，无需重新获取");
+        }
+    }
+
+    /**
+     * 检查临时凭证是否有效（存在且未过期）
+     */
+    private boolean isTemporaryCredentialsValid(ALiYunTemporaryCredentials tempCredentials) {
+        // 检查是否已有临时AK/SK以及过期时间
+        boolean hasTemporaryCredentials = tempCredentials.getStsAccessKey() != null && !tempCredentials.getStsAccessKey().isEmpty() &&
+                tempCredentials.getStsSecretKey() != null && !tempCredentials.getStsSecretKey().isEmpty() &&
+                tempCredentials.getStsTokenExpiration() != null && !tempCredentials.getStsTokenExpiration().isEmpty();
+
+        if (!hasTemporaryCredentials) {
+            return false;
+        }
+
+        // 检查是否过期
+        try {
+            // 解析UTC时间字符串
+            String expirationStr = tempCredentials.getStsTokenExpiration();
+            Instant expirationInstant;
+
+            // 判断是哪种时间格式
+            if (expirationStr.contains("T")) {
+                // ISO-8601格式 (例如: 2025-11-29T00:49:37Z)
+                expirationInstant = Instant.parse(expirationStr);
+            } else {
+                // 自定义格式 (例如: 2025-11-29 00:49:37)
+                DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+                LocalDateTime localDateTime = LocalDateTime.parse(expirationStr, formatter);
+                expirationInstant = localDateTime.atZone(ZoneId.systemDefault()).toInstant();
+            }
+
+            Instant currentInstant = Instant.now();
+
+            // 判断是否过期（考虑5分钟缓冲时间）
+            return currentInstant.isBefore(expirationInstant.minusSeconds(300));
+        } catch (Exception e) {
+            // 解析时间出错，认为已过期
+            return false;
+        }
+    }
+
+    private void setReplaceConfig(ReplaceConfig replaceConfig, Optional<SpringBootConfig> optionalSpringBootConfig, Map<String, List<String>> namespaceServiceMap, String projectBasePath) {
+        if (ObjectUtil.isEmpty(replaceConfig.getNacosGroup())) {
+            replaceConfig.setNacosGroup(optionalSpringBootConfig.map(SpringBootConfig::getCloud).map(SpringBootConfig.Cloud::getNacos).map(SpringBootConfig.Nacos::getConfig).map(SpringBootConfig.NacosConfig::getGroup).orElse(""));
+        }
+        if (ObjectUtil.isEmpty(replaceConfig.getNacosDataId())) {
+            replaceConfig.setNacosDataId(optionalSpringBootConfig.map(SpringBootConfig::getCloud).map(SpringBootConfig.Cloud::getNacos).map(SpringBootConfig.Nacos::getConfig).map(SpringBootConfig.NacosConfig::getDataId).orElse(replaceConfig.getAppName() + ".yaml"));
+        }
+        if (ObjectUtil.isEmpty(replaceConfig.getNacosNamespaceId())) {
+            replaceConfig.setNacosNamespaceId(optionalSpringBootConfig.map(SpringBootConfig::getCloud).map(SpringBootConfig.Cloud::getNacos).map(SpringBootConfig.Nacos::getConfig).map(SpringBootConfig.NacosConfig::getNamespace).orElse(""));
+        }
+        String namespace = nacosNamespaceJsonObj.getStr(replaceConfig.getNacosNamespaceId(), "");
+        if (ObjectUtil.isEmpty(replaceConfig.getK8sServiceName())) {
+            replaceConfig.setK8sServiceName(getK8sServiceName(optionalSpringBootConfig.map(SpringBootConfig::getApplication).map(SpringBootConfig.Application::getName).orElse(""), namespaceServiceMap.get(namespace)));
+        }
+        replaceConfig.setK8sServiceNamespace(namespace);
+        if (ObjectUtil.isEmpty(replaceConfig.getServiceType())) {
+            String serviceType = getServiceType(replaceConfig.getK8sServiceNamespace(), replaceConfig.getAppName(), projectBasePath);
+            replaceConfig.setServiceType(serviceType);
+        }
+    }
+
+    private String getServiceType(String k8sServiceNamespace, String applicationName, String projectBasePath) {
+        String serviceType = String.format("%s or %s? 需要个人根据项目type选择一下", BFF, RPC);
+        if (k8sServiceNamespace.contains("business") || k8sServiceNamespace.contains("storefront")) {
+            serviceType = BFF;
+        } else if (k8sServiceNamespace.contains("engagement")) {
+            // special case
+            if (projectBasePath.contains("messaging-edge-service-parent")) {
+                serviceType = BFF;
+            } else if (projectBasePath.contains("core-bridge-service-parent")) {
+                serviceType = BFF;
+            } else if (projectBasePath.contains("core-bridge-gateway")) {
+                serviceType = BFF;
+            } else if (projectBasePath.contains("voice-service")) {
+                serviceType = BFF;
+            } else {
+                serviceType = RPC;
+            }
+        } else if (k8sServiceNamespace.contains("internal")) {
+            if ("internal-console".equals(applicationName)) {
+                serviceType = BFF;
+            } else {
+                serviceType = RPC;
+            }
+        } else if (k8sServiceNamespace.contains("shared-service")) {
+            if (projectBasePath.contains("commerce-core-parent")) {
+                serviceType = BFF;
+            } else if (projectBasePath.contains("callback-gateway")) {
+                serviceType = BFF;
+            } else {
+                serviceType = RPC;
+            }
+        } else if (k8sServiceNamespace.contains("intranet")) {
+            if ("toolset-console".equals(applicationName)) {
+                serviceType = BFF;
+            } else {
+                serviceType = RPC;
+            }
+        }
+        return serviceType;
+    }
+
+    /**
+     * 由于不同服务,k8s上注册的service name和app name不一定一致,所以通过相似度匹配算法来通过appName来找到可能的service name
+     * (暂定通过: edit distance来判断)
+     */
+    private String getK8sServiceName(String appName, List<String> candidateServiceNames) {
+        if (ObjectUtil.isEmpty(candidateServiceNames) || ObjectUtil.isEmpty(appName)) {
+            return "";
+        }
+        String tip = "需要通过.localdebug.k8sServices.json找到service name";
+        Set<String> candidates = new HashSet<>();
+        String[] parts = appName.split("-");
+        for (String candidate : candidateServiceNames) {
+            for (String p : parts) {
+                if (!"provider".equals(p) && !"management".equals(p) && !"service".equals(p) && candidate.contains(p)) {
+                    candidates.add(candidate);
+                }
+            }
+        }
+        if (candidates.isEmpty()) {
+            return tip;
+        }
+
+        Integer minDis = Integer.MAX_VALUE;
+        List<String> result = new LinkedList<>();
+        for (String candidate : candidates) {
+            Integer dis = getEditDistance(appName, candidate);
+            if (dis < minDis) {
+                minDis = dis;
+                result = new LinkedList<>();
+                result.add(candidate);
+            } else if (dis.equals(minDis)) {
+                result.add(candidate);
+            }
+        }
+        if (result.isEmpty()) {
+            return tip;
+        }
+        if (result.size() == 1) {
+            return result.get(0);
+        }
+        return String.join(" or ", result) + String.format("(%s)", tip);
+    }
+
+    private Integer getEditDistance(String a, String b) {
+        int aLen = a.length();
+        int bLen = b.length();
+
+        if (aLen == 0) {
+            return aLen;
+        }
+        if (bLen == 0) {
+            return bLen;
+        }
+
+        int[][] v = new int[aLen + 1][bLen + 1];
+        for (int i = 0; i <= aLen; ++i) {
+            for (int j = 0; j <= bLen; ++j) {
+                if (i == 0) {
+                    v[i][j] = j;
+                } else if (j == 0) {
+                    v[i][j] = i;
+                } else if (a.charAt(i - 1) == b.charAt(j - 1)) {
+                    v[i][j] = v[i - 1][j - 1];
+                } else {
+                    v[i][j] = 1 + Math.min(v[i - 1][j - 1], Math.min(v[i][j - 1], v[i - 1][j]));
+                }
+            }
+        }
+        return v[aLen][bLen];
+    }
+
+    private Map<String, List<String>> generateK8sServiceConfigFile(String projectBasePath) {
+        Map<String, List<String>> localDebugK8sServicesConfigMap = new HashMap<>();
+        // 生成k8s所有命名空间下的services
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        Future<Boolean> future = null;
+        try {
+            future = executor.submit(() -> {
+                // 生成k8s所有命名空间下的services(不包括ktctl部署上去的service,避免影响后续的k8sServiceName的识别)
+                // OS 无关：Windows 用 kubectl.exe，Unix 用无后缀名
+                String kubectlPath = DirectoryUtil.getToolsBinDir() + File.separator + EnvUtil.toolBinaryName("kubectl");
+                String str = RuntimeUtil.execForStr(kubectlPath + " get services --all-namespaces -l control-by!=kt -o=json");
+                log.info("str: {}", str);
+                if (Objects.equals(JSONUtil.parseObj(str).toString(), "{}")) {
+                    return true;
+                }
+                List<K8sServiceItems> items = JSONUtil.toList(JSONUtil.parseObj(str).getObj("items", "{}").toString(), K8sServiceItems.class);
+                String localDebugK8sServicesConfigPath = projectBasePath + File.separator + Constants.LOCAL_DEBUG_K8S_SERVICES_CONFIG_NAME;
+                for (K8sServiceItems item : items) {
+                    if (item.getMetadata() != null) {
+                        String namespace = item.getMetadata().getNamespace();
+                        if (namespace.contains("dev1")) {
+                            continue;
+                        }
+                        String name = item.getMetadata().getName();
+                        List<String> nameList = localDebugK8sServicesConfigMap.getOrDefault(namespace, new ArrayList<>());
+                        nameList.add(name);
+                        localDebugK8sServicesConfigMap.put(namespace, nameList);
+                    }
+                }
+                FileUtil.writeUtf8String(JSONUtil.parseObj(localDebugK8sServicesConfigMap).toJSONString(2), localDebugK8sServicesConfigPath);
+                return true;
+            });
+            future.get(5, TimeUnit.SECONDS);
+        } catch (ExecutionException | TimeoutException e) {
+            // 终止子线程执行逻辑
+            future.cancel(true);
+        } catch (Exception e) {
+            Thread.currentThread().interrupt();
+        }
+        return localDebugK8sServicesConfigMap;
+    }
+}
