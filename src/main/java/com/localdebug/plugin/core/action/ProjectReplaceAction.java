@@ -57,7 +57,7 @@ public class ProjectReplaceAction implements Action {
 
         ALiYunConfig aliYunConfig = InternalFileUtil.getGlobalProjectMqConfig();
         if (!aliYunConfig.isValidConfig()) {
-            LogOutputUtil.error(logger, "阿里云配置不能有空配置，请先填写阿里云配置信息");
+            LogOutputUtil.error(logger, "nacos 地址未配置，请先填写阿里云配置信息");
             return;
         }
 
@@ -139,7 +139,12 @@ public class ProjectReplaceAction implements Action {
                             }
                             if (ObjectUtil.isNotEmpty(item.getAddr())) {
                                 item.setRamRole(null);
-                                item.setAddr(aliYunConfig.getMqAddr());
+                                // mqAddr 可选：缺失时跳过 producer 地址替换
+                                if (ObjectUtil.isEmpty(aliYunConfig.getMqAddr())) {
+                                    log.warn("mqAddr 未配置，跳过 producer 地址替换: {}", item.getAddr());
+                                } else {
+                                    item.setAddr(aliYunConfig.getMqAddr());
+                                }
                             }
                             newProducers.add(item);
                         }
@@ -169,6 +174,11 @@ public class ProjectReplaceAction implements Action {
             String applicationConfig = configService.getConfig(dataId, replaceConfig.getNacosGroup(), 3000L);
             if (ObjectUtil.isEmpty(applicationConfig)) {
                 continue;
+            }
+            // roleArn 可选：缺失时跳过占位符替换，避免 replaceAll 空值 NPE
+            if (ObjectUtil.isEmpty(aliYunConfig.getRamRole())) {
+                log.warn("ramRole 未配置，跳过 ${mainServiceRamRoleName} 占位符替换");
+                return applicationConfig;
             }
             return applicationConfig.replaceAll("\\$\\{mainServiceRamRoleName\\}", aliYunConfig.getRamRole());
         }
@@ -240,10 +250,15 @@ public class ProjectReplaceAction implements Action {
             jvmParameters.setMainClass(replaceConfig.getAppMainClass());
             String nacosServerAddr = removeProtocolAndPort(aliYunConfig.getNacosServerAddr());
             String mqAddr = removeProtocolAndPort(aliYunConfig.getMqAddr());
-            String jvmArgs = localDebugConfig.getJvmArgs() + " -Dhttp.nonProxyHosts=" + nacosServerAddr + "|" + nacosServerAddr.toLowerCase()
-                    + "|" + mqAddr + "|" + mqAddr.toLowerCase()
-                    + "|" + mqAddr.replace("_", "-")
-                    + "|" + mqAddr.toLowerCase().replace("_", "-");
+            String jvmArgs = localDebugConfig.getJvmArgs() + " -Dhttp.nonProxyHosts=" + nacosServerAddr + "|" + nacosServerAddr.toLowerCase();
+            // mqAddr 可选：缺失时跳过 mq 地址 nonProxyHosts 配置，避免空值拼接/NPE
+            if (ObjectUtil.isNotEmpty(mqAddr)) {
+                jvmArgs += "|" + mqAddr + "|" + mqAddr.toLowerCase()
+                        + "|" + mqAddr.replace("_", "-")
+                        + "|" + mqAddr.toLowerCase().replace("_", "-");
+            } else {
+                log.warn("mqAddr 未配置，跳过 mq 地址 nonProxyHosts 配置");
+            }
             String alias = replaceConfig.getK8sServiceName() + "-" + replaceConfig.getTag();
             jvmParameters.setJvmArgs(jvmArgs + String.format(" -DDUBBO_IP_TO_REGISTRY=%s.%s.svc.cluster.local", alias, replaceConfig.getK8sServiceNamespace()));
             list.add(jvmParameters);

@@ -160,6 +160,6 @@ public class DebugCommandsPanel extends JPanel {
      */
     private static final class ConfigManagerHolder {
         private static final com.localdebug.plugin.core.config.ConfigManager CONFIG_MANAGER =
-                new com.localdebug.plugin.core.config.ConfigManager();
+                com.localdebug.plugin.core.config.ConfigManager.getInstance();
     }
 }

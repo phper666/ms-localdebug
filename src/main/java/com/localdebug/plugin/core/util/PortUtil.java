@@ -8,6 +8,7 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.io.File;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 
@@ -23,13 +24,19 @@ import static com.localdebug.plugin.core.constant.Constants.PORT_CONFIG_FILE_NAM
 @UtilityClass
 public class PortUtil {
     private static final int DEFAULT_START_PORT = 8080;
-    
+    /** 系统属性可覆盖配置根目录（测试隔离用），生产默认 ~/.localdebug/config */
+    private static final String CONFIG_DIR_OVERRIDE_PROP = "localdebug.config.dir";
+
     /**
      * 获取项目端口配置文件路径
      * 
      * @return 端口配置文件路径
      */
     private static Path getPortConfigFilePath() {
+        String override = System.getProperty(CONFIG_DIR_OVERRIDE_PROP);
+        if (override != null && !override.isEmpty()) {
+            return Paths.get(override, PORT_CONFIG_FILE_NAME);
+        }
         return Paths.get(DirectoryUtil.getToolsConfigDir().toString(), PORT_CONFIG_FILE_NAME);
     }
     
@@ -44,9 +51,9 @@ public class PortUtil {
         
         // 如果配置文件不存在，创建一个新的
         if (!configFile.exists()) {
-            // 确保配置目录存在
+            // 确保配置目录存在（覆盖目录或真实配置目录）
             try {
-                DirectoryUtil.ensureToolsConfigDirExists();
+                Files.createDirectories(configPath.getParent());
             } catch (Exception e) {
                 log.error("Failed to create config directory", e);
             }
@@ -93,7 +100,7 @@ public class PortUtil {
      * @param projectPath 项目路径
      * @return 分配给项目的BFF端口
      */
-    public static int getBffPortForProject(String projectPath) {
+    public synchronized static int getBffPortForProject(String projectPath) {
         JSONObject config = getOrCreatePortConfig();
         
         // 如果项目已经有分配的BFF端口，直接返回
@@ -142,7 +149,7 @@ public class PortUtil {
      * @param projectPath 项目路径
      * @return 分配给项目的RPC端口
      */
-    public static int getRpcPortForProject(String projectPath) {
+    public synchronized static int getRpcPortForProject(String projectPath) {
         JSONObject config = getOrCreatePortConfig();
         
         // 如果项目已经有分配的RPC端口，直接返回
@@ -191,7 +198,7 @@ public class PortUtil {
      * @param projectPath 项目路径
      * @return 包含BFF端口和RPC端口的数组，索引0为BFF端口，索引1为RPC端口
      */
-    public static int[] getPortsForProject(String projectPath) {
+    public synchronized static int[] getPortsForProject(String projectPath) {
         return new int[] {getBffPortForProject(projectPath), getRpcPortForProject(projectPath)};
     }
     
@@ -202,7 +209,7 @@ public class PortUtil {
      * @param bffPort BFF端口号
      * @param rpcPort RPC端口号
      */
-    public static void updatePortsForProject(String projectPath, int bffPort, int rpcPort) {
+    public synchronized static void updatePortsForProject(String projectPath, int bffPort, int rpcPort) {
         JSONObject config = getOrCreatePortConfig();
         config.set(projectPath + "_bff", bffPort);
         config.set(projectPath + "_rpc", rpcPort);

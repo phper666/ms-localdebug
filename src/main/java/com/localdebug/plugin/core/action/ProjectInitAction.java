@@ -96,7 +96,7 @@ public class ProjectInitAction implements Action {
         }
 
         if (!aliYunConfig.isValidConfig()) {
-            LogOutputUtil.error(logger, "阿里云配置不能有空配置，请先填写阿里云配置信息");
+            LogOutputUtil.error(logger, "nacos 地址未配置，请先填写阿里云配置信息");
             return;
         }
 
@@ -224,6 +224,12 @@ public class ProjectInitAction implements Action {
     }
 
     private Map<String, Object> buildPatchContext(ALiYunConfig aliYunConfig, ALiYunTemporaryCredentials tempCredentials, ReplaceConfig replaceConfig) {
+        if (ObjectUtil.isEmpty(aliYunConfig.getMqAddr())) {
+            log.warn("mqAddr 未配置，中间件 MQ 相关配置将为空");
+        }
+        if (ObjectUtil.isEmpty(aliYunConfig.getRoleArn())) {
+            log.warn("roleArn 未配置，RAM 角色相关配置将为空");
+        }
         Map<String, Object> context = new HashMap<>();
         context.put("mqAddr", aliYunConfig.getMqAddr());
         context.put("roleArn", aliYunConfig.getRoleArn());
@@ -247,6 +253,12 @@ public class ProjectInitAction implements Action {
     private void updateTemporaryCredentialsIfNeeded(ALiYunConfig aliYunConfig, ALiYunTemporaryCredentials tempCredentials, Consumer<String> logger) throws Exception {
         // 检查是否需要更新临时凭证（不存在或已过期）
         if (!isTemporaryCredentialsValid(tempCredentials)) {
+            // AK/SK/roleArn 为可选字段：缺失时明确报错并跳过 STS 获取（由外层 catch 统一提示）
+            if (ObjectUtil.isEmpty(aliYunConfig.getAccessKey()) ||
+                    ObjectUtil.isEmpty(aliYunConfig.getSecretKey()) ||
+                    ObjectUtil.isEmpty(aliYunConfig.getRoleArn())) {
+                throw new RuntimeException("未配置阿里云 AK/SK 或 roleArn，无法获取临时凭证");
+            }
             LogOutputUtil.log(logger, "正在获取临时AK/SK凭证...");
 
             // 调用阿里云接口获取临时凭证

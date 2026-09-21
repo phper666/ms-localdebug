@@ -53,6 +53,10 @@ dependencies {
     implementation("net.lingala.zip4j:zip4j:" + properties("dependencies.zip4j.version").get())
     // pom.xml 正则改写引擎（core/maven MavenUtil）
     implementation("org.apache.maven:maven-model:" + properties("dependencies.maven.model.version").get())
+
+    // JUnit5 最小单测（ConfigManager / PortUtil）
+    testImplementation(platform("org.junit:junit-bom:5.9.2"))
+    testImplementation("org.junit.jupiter:junit-jupiter")
 }
 
 // Configure Gradle IntelliJ Plugin
@@ -65,6 +69,11 @@ intellij {
 }
 
 tasks {
+    test {
+        // JUnit5 平台（P0 最小单测：ConfigManager/PortUtil）
+        useJUnitPlatform()
+    }
+
     runIde{
         // 启用热重载功能，使用Build菜单编译项目后无需重启调试进程即可完成, 仅支持JBR
 //        jvmArgs = listOf(

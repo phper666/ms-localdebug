@@ -27,7 +27,7 @@ public class ToolsPanel extends JPanel {
     private static final DateTimeFormatter TIMESTAMP_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
     private final Project project;
-    private final ConfigManager configManager = new ConfigManager();
+    private final ConfigManager configManager = ConfigManager.getInstance();
     private final JBTextArea logArea = new JBTextArea();
 
     public ToolsPanel(Project project) {

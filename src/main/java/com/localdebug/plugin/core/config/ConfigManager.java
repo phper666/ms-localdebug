@@ -15,8 +15,11 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -28,17 +31,39 @@ import java.util.List;
 public class ConfigManager {
     private static final String CONFIG_FILE_NAME = "config.json";
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+    /** 系统属性可覆盖配置根目录（测试隔离用），生产默认 ~/.localdebug/config */
+    private static final String CONFIG_DIR_OVERRIDE_PROP = "localdebug.config.dir";
+
+    /**
+     * 单例持有者（static holder 延迟初始化）
+     */
+    private static class Holder {
+        private static final ConfigManager INSTANCE = new ConfigManager();
+    }
 
     private Config config;
+    /** 磁盘文件解析失败标记：为 true 且目标文件仍不可解析时禁止覆盖保存，防止损坏配置被默认配置清空 */
+    private volatile boolean invalidOnDisk = false;
 
-    public ConfigManager() {
+    private ConfigManager() {
         loadConfig();
     }
 
     /**
-     * 获取用户配置目录路径
+     * 获取全局单例
+     */
+    public static ConfigManager getInstance() {
+        return Holder.INSTANCE;
+    }
+
+    /**
+     * 获取用户配置目录路径（支持系统属性覆盖，测试隔离用）
      */
     private Path getUserConfigDirectory() {
+        String override = System.getProperty(CONFIG_DIR_OVERRIDE_PROP);
+        if (StrUtil.isNotBlank(override)) {
+            return Paths.get(override);
+        }
         return DirectoryUtil.getToolsConfigDir();
     }
 
@@ -61,6 +86,7 @@ public class ConfigManager {
      * 加载配置文件
      */
     public void loadConfig() {
+        invalidOnDisk = false;
         try {
             Path configDir = getUserConfigDirectory();
             Path configPath = configDir.resolve(CONFIG_FILE_NAME);
@@ -74,13 +100,16 @@ public class ConfigManager {
                 log.info("使用默认配置");
             }
         } catch (Exception e) {
-            log.error("加载配置文件失败，使用默认配置", e);
+            // 解析失败：保留磁盘原文件不落盘，标记损坏状态禁止后续覆盖保存
+            invalidOnDisk = true;
+            log.warn("配置文件损坏或不可解析，保留原文件并使用默认配置（修复前禁止覆盖保存）: {}",
+                    getUserConfigDirectory().resolve(CONFIG_FILE_NAME), e);
             config = loadDefaultConfig();
         }
     }
 
     /**
-     * 保存配置文件
+     * 保存配置文件（原子写：tmp 文件 + move 覆盖；损坏保护：磁盘文件不可解析时拒绝写入）
      */
     public void saveConfig() {
         try {
@@ -90,11 +119,40 @@ public class ConfigManager {
             }
 
             Path configPath = configDir.resolve(CONFIG_FILE_NAME);
+            if (invalidOnDisk && !isFileParseable(configPath)) {
+                log.warn("磁盘配置文件损坏且不可解析，拒绝覆盖保存，请手动修复: {}", configPath);
+                return;
+            }
+
             String json = GSON.toJson(config);
-            FileUtil.writeUtf8String(json, configPath.toFile());
+            Path tmpPath = configDir.resolve(CONFIG_FILE_NAME + ".tmp");
+            FileUtil.writeUtf8String(json, tmpPath.toFile());
+            try {
+                Files.move(tmpPath, configPath, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException e) {
+                log.debug("原子移动不受支持，降级为普通移动: {}", configPath);
+                Files.move(tmpPath, configPath, StandardCopyOption.REPLACE_EXISTING);
+            }
+            invalidOnDisk = false;
             log.info("配置已保存到: {}", configPath);
         } catch (Exception e) {
             log.error("保存配置文件失败", e);
+        }
+    }
+
+    /**
+     * 检查目标文件当前是否可解析（不存在视为可解析，无保护必要）
+     */
+    private boolean isFileParseable(Path configPath) {
+        try {
+            if (!Files.exists(configPath)) {
+                return true;
+            }
+            String json = FileUtil.readUtf8String(configPath.toFile());
+            GSON.fromJson(json, Config.class);
+            return true;
+        } catch (Exception e) {
+            return false;
         }
     }
 

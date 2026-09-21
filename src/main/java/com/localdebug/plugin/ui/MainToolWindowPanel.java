@@ -41,7 +41,7 @@ public class MainToolWindowPanel extends JPanel {
     private static final DateTimeFormatter TIMESTAMP_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
     private final Project project;
-    private final ConfigManager configManager = new ConfigManager();
+    private final ConfigManager configManager = ConfigManager.getInstance();
     private final JComboBox<String> projectCombo = new JComboBox<>();
     private final JBTextArea logArea = new JBTextArea();
 

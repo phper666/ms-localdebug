@@ -34,34 +34,13 @@ public class ALiYunConfig {
     private List<Producers> producers = new ArrayList<>();
 
     /**
-     * 验证配置是否完整，所有必要属性都不为空
+     * 验证配置是否有效：仅 nacosServerAddr 必填，其余字段可选
+     * （可选字段缺失时由调用方跳过对应功能并记录日志，见 isValidConfig 调用点）
      *
-     * @return 如果所有属性都不为空返回true，否则返回false
+     * @return nacosServerAddr 非空返回 true，否则返回 false
      */
     public boolean isValidConfig() {
-        // 检查基本字符串属性
-        if (ObjectUtil.isEmpty(nacosServerAddr) ||
-                ObjectUtil.isEmpty(ramRole) ||
-                ObjectUtil.isEmpty(mqAddr) ||
-                ObjectUtil.isEmpty(roleArn) ||
-                ObjectUtil.isEmpty(accessKey) ||
-                ObjectUtil.isEmpty(secretKey)) {
-            return false;
-        }
-
-        // 检查MQ消费者列表
-        if (ObjectUtil.isEmpty(mqConsumers)) {
-            return false;
-        }
-
-        // 检查每个MQ消费者的groupId
-        for (MqConsumer consumer : mqConsumers) {
-            if (ObjectUtil.isEmpty(consumer) || ObjectUtil.isEmpty(consumer.getGroupId())) {
-                return false;
-            }
-        }
-
-        return true;
+        return !ObjectUtil.isEmpty(nacosServerAddr);
     }
 
     @Data
