@@ -1,0 +1,82 @@
+{
+  "stack": "sca-dubbo-ktctl",
+  "displayName": "Spring Cloud Alibaba + Dubbo + kt-connect（默认栈）",
+  "schemaVersion": 1,
+
+  "configCenter": {
+    "type": "nacos",
+    "fallbackDataIdSuffix": ".yaml"
+  },
+
+  "registryPatch": {
+    "discoveryIpKey": "spring.cloud.nacos.discovery.ip",
+    "discoveryPortKey": "spring.cloud.nacos.discovery.port",
+    "discoveryIpTemplate": "{svc}.{ns}.svc.cluster.local",
+    "discoveryPortValue": 80,
+    "appNameTemplate": "{app}-{tag}",
+    "bootstrapPatch": {
+      "spring.cloud.nacos.config.server-addr": "{configCenterAddr}",
+      "spring.application.name": "application-localdebug"
+    },
+    "importCheckKey": "spring.cloud.nacos.config.import-check.enabled",
+    "importCheckValue": false
+  },
+
+  "routingEnabler": {
+    "mode": "provider-tag",
+    "httpLaneHeader": "tag",
+    "rpcAttachmentKey": "dubbo.tag",
+    "rpcProviderTagKey": "dubbo.provider.tag",
+    "shadowNameTemplate": "{svc}-{tag}",
+    "forcedRpcPort": 20880,
+    "rpcRegistryEnvVar": "DUBBO_IP_TO_REGISTRY",
+    "rpcRegistryIpTemplate": "{svc}-{tag}.{ns}.svc.cluster.local",
+    "nonProxyHostsSources": ["{configCenterAddr}", "{mqAddr}"],
+    "requiredOrgComponents": [
+      "网关按 header 'tag' 改写 lb 目标到影子服务（LocalRouteForward 类组件）",
+      "消费侧已透传 attachment 'dubbo.tag'（如 platform-common 的 DubboTagClusterInterceptor）",
+      "dev 集群 DNS 可达（隧道工具建 {svc}-{tag} Service）"
+    ]
+  },
+
+  "proxyModel": "mesh-service",
+  "proxy": {
+    "tool": "ktctl",
+    "templates": {
+      "connect": "ktctl -d -n {ns} connect",
+      "mesh":    "ktctl -d -n {ns} mesh {svc} --expose {port}:8080 --versionMark tag:{tag}",
+      "preview": "ktctl -d -n {ns} preview {alias} --expose {rpcPort}:{rpcPort}",
+      "recover": "ktctl -d -n {ns} recover {svc}",
+      "clean":   "ktctl -d -n {ns} clean"
+    },
+    "stopMechanism": "signal-file",
+    "rollbackActions": ["recover", "clean"]
+  },
+
+  "bootIsolation": {
+    "nacos": { "renameApp": "application-localdebug", "disableImportCheck": true }
+  },
+
+  "runtimeEnv": "k8s",
+
+  "credentials": [
+    { "provider": "aliyun-sts", "required": false, "ttlSeconds": 28800 }
+  ],
+
+  "validation": {
+    "required": ["configCenterAddr"],
+    "optional": ["mqAddr", "roleArn", "schedulerNamespace", "schedulerGroupId", "schedulerAppKey"],
+    "precheck": ["routingEnabler.requiredOrgComponents"],
+    "forced": ["mqIndependentGroup"]
+  },
+
+  "middlewareGroup": {
+    "key": "churchill",
+    "mqConsumersKey": "churchill.rocketmq.default-config",
+    "producersKey": "churchill.rocketmq.producers"
+  },
+
+  "safety": {
+    "forceIndependentMqGroup": true
+  }
+}
