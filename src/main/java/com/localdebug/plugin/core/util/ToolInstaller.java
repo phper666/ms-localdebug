@@ -5,9 +5,11 @@ import lombok.extern.slf4j.Slf4j;
 import net.lingala.zip4j.ZipFile;
 
 import java.io.BufferedReader;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.Arrays;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
@@ -61,25 +63,33 @@ public class ToolInstaller {
     }
 
     /**
-     * 下载并配置 ktconnect 工具（下载 zip -> zip4j 解压 -> 验证）
+     * 下载并配置 ktconnect 工具。
+     * 支持两种发布格式：zip 归档（如 Windows 包，含 wintun.dll）自动解压；
+     * 裸二进制（Linux/macOS 的 goreleaser binary 产物）直接安装为 ktctl。
      */
     public static void installKtconnect(String downloadUrl, Consumer<String> logger) {
         try {
             LogOutputUtil.log(logger, "开始下载 ktconnect...，下载地址: " + downloadUrl);
 
             Path toolsDir = DirectoryUtil.ensureToolsBinDirExists();
-            Path downloadedFile = toolsDir.resolve("ktctl.zip");
+            Path downloadedFile = toolsDir.resolve("ktctl.download");
             LogOutputUtil.log(logger, "正在下载到: " + downloadedFile);
             HttpUtil.downloadFile(downloadUrl, downloadedFile.toFile());
 
-            LogOutputUtil.log(logger, "正在解压文件...");
-            ZipFile zipFile = new ZipFile(downloadedFile.toFile());
-            zipFile.extractAll(toolsDir.toString());
-            LogOutputUtil.log(logger, "解压完成");
+            if (isZipArchive(downloadedFile)) {
+                LogOutputUtil.log(logger, "检测到 zip 归档，正在解压...");
+                ZipFile zipFile = new ZipFile(downloadedFile.toFile());
+                zipFile.extractAll(toolsDir.toString());
+                LogOutputUtil.log(logger, "解压完成");
+            } else {
+                Path ktctlTarget = toolsDir.resolve(EnvUtil.toolBinaryName("ktctl"));
+                Files.move(downloadedFile, ktctlTarget, StandardCopyOption.REPLACE_EXISTING);
+                LogOutputUtil.log(logger, "检测到裸二进制，直接安装为 " + ktctlTarget.getFileName());
+            }
 
             Path ktctlBinary = toolsDir.resolve(EnvUtil.toolBinaryName("ktctl"));
             if (Files.exists(ktctlBinary)) {
-                LogOutputUtil.log(logger, EnvUtil.toolBinaryName("ktctl") + " 文件已提取");
+                LogOutputUtil.log(logger, EnvUtil.toolBinaryName("ktctl") + " 文件已就绪");
                 if (!EnvUtil.isWindows()) {
                     Files.setPosixFilePermissions(ktctlBinary, java.nio.file.attribute.PosixFilePermissions.fromString("rwxr-xr-x"));
                 }
@@ -97,6 +107,18 @@ public class ToolInstaller {
             LogOutputUtil.log(logger, "ktconnect 已成功安装");
         } catch (Exception e) {
             LogOutputUtil.error(logger, "安装 ktconnect 失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 判断文件是否为 ZIP 归档（读取文件头 2 字节是否为 "PK"）
+     */
+    private static boolean isZipArchive(Path file) {
+        try (InputStream in = Files.newInputStream(file)) {
+            byte[] head = new byte[2];
+            return in.read(head) == 2 && head[0] == 0x50 && head[1] == 0x4B;
+        } catch (Exception e) {
+            return false;
         }
     }
 
