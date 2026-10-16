@@ -61,27 +61,23 @@ ProjectInit/Replace/Rollback                     ProjectInit/Replace/Rollback
       "server.port": ""
     }
   },
-  "dyeing": {                                       // 染色：header → 实例标签（调研§5 同构模型）
-    "httpLaneHeader": "tag",                        // BFF 网关染色 header
-    "rpcAttachmentKey": "dubbo.tag",                // 消费侧 attachment 键
-    "rpcProviderTagKey": "dubbo.provider.tag",      // provider 标签键
-    "envVarForRegistryIp": "DUBBO_IP_TO_REGISTRY",  // 协议层注册伪装环境变量（可空）
-    "registryIpTemplate": "{svc}-{tag}.{ns}.svc.cluster.local",
-    "nonProxyHostsAdditions": ["{nacosAddr}", "{mqAddr}"]  // jvmrc nonProxyHosts（含变体规则）
-  },
   "proxy": {                                        // 隧道工具命令模板（M8 收编）
     "tool": "ktctl",
     "templates": {
       "connect": "ktctl -d -n {ns} connect",
       "mesh":    "ktctl -d -n {ns} mesh {svc} --expose {port}:8080 --versionMark tag:{tag}",
       "preview": "ktctl -d -n {ns} preview {alias} --expose {rpcPort}:{rpcPort}",
-      "recover": "ktctl -d -n {ns} recover {svc}",
-      "clean":   "ktctl -d -n {ns} clean"
-    }
+      "recover": "ktctl -d -n {ns} recover {svc} ",
+      "clean":   "ktctl -d -n {ns} clean "
+    },
+    "stopMechanism": "signal-file",
+    "rollbackActions": ["recover", "clean"]
   },
   "credentials": [],                                 // 默认空；按 patch 占位符按需启用（静态 AK 场景连 Provider 都不用）
-  "validation": { "required": ["configCenterAddr"], "optional": ["mqAddr","roleArn","sts"],
-                  "precheck": ["routingEnabler"] },  // 前提自检项（非字段校验）
+  "validation": { "required": ["configCenterAddr"],
+                  "optional": ["mqAddr","roleArn","schedulerNamespace","schedulerGroupId","schedulerAppKey"],
+                  "precheck": ["routingEnabler.requiredOrgComponents"],
+                  "forced": ["mqIndependentGroup"] },  // forced=强制不变式（恒校验）
   "routingEnabler": {                                // ★ 组织路由启用器契约（L4 前提显性化）+ 染色定义唯一出处
     "mode": "provider-tag",                         // provider-tag | consumer-hint | infra-subset | none
                                                     //   none=全量影子（gRPC 无 tag 原语），启动显式告警（能力上限声明）
@@ -96,19 +92,21 @@ ProjectInit/Replace/Rollback                     ProjectInit/Replace/Rollback
   },
   "proxyModel": "mesh-service",                      // ★ mesh-service | intercept | portforward | direct
                                                      //   机制分支开关：决定注册伪装策略+染色命名契约+rollback 动作（工具切换=机制切换，L2-L3）
-  "inherits": "builtin:sca-dubbo-ktctl-base",        // ★ 描述符继承：内置模板+仅覆盖差异字段（防五维组合爆炸，用户写不出第二份）
+  "inherits": "builtin:sca-dubbo-ktctl",             // ★ 描述符继承：内置模板+仅覆盖差异字段（防五维组合爆炸）；删除继承键用 {"$delete": true} 哨兵，null 保留写 null 语义
   "bootIsolation": {                                 // ★ P1 仅记录意图（唯一实现 nacos）；P3 收敛进 ConfigCenterProvider——防描述符退化为贫血 DSL
     "nacos": { "renameApp": "application-localdebug", "disableImportCheck": true }
   },
   "runtimeEnv": "k8s",                               // ★ k8s | mesh | non-k8s（non-k8s=整模型失效 L4，拒绝或文档化）
                                                     //   与 proxyModel 交叉校验（non-k8s × mesh-service = 非法组合）
   "schemaVersion": 1,                                // ★ 描述符 schema 版本（元校验依据）
-  "middlewareGroup": { "key": "churchill", "mqConsumersKey": "churchill.rocketmq.default-config" },
+  "middlewareGroup": { "key": "churchill", "mqConsumersKey": "churchill.rocketmq.default-config", "producersKey": "churchill.rocketmq.producers" },
   "safety": { "forceIndependentMqGroup": true }     // 不可妥协项：影子实例禁入共享消费组
 }
 ```
 
-**换栈 = 换/新增一份描述符**：Eureka=换 registryPatch 键组；SC LB hint=换 dyeing 键；apollo=换 configCenter.type + bootIsolation。**但注意边界**（详见 BOUNDARY-map.md）：代理工具切换（telepresence 等）=机制切换，非模板字符串可表达；流量染色端到端依赖组织路由启用器（L4 前提）。
+**换栈 = 换/新增一份描述符**：Eureka=换 registryPatch 键组；SC LB hint=换 routingEnabler 键；apollo=换 configCenter.type + bootIsolation。**但注意边界**（详见 BOUNDARY-map.md）：代理工具切换（telepresence 等）=机制切换，非模板字符串可表达；流量染色端到端依赖组织路由启用器（L4 前提）。
+
+**已声明未接线字段清单**（P2/P3 勿误以为可用）：`safety`（除 forceIndependentMqGroup 已接线）、`bootIsolation`、`credentials`、`formFields`、`configCenter.fallbackDataIdSuffix`（`.yaml` 兜底仍硬编码于 ProjectReplaceAction）、`middlewareGroup.mqConsumersKey`、`routingEnabler` 的 httpLaneHeader/rpcAttachmentKey/shadowNameTemplate（仅 Validator 引用）、`RollbackPlanner`（待 rollback 命令通道）。
 
 ### 2.3 debugProfile（取代 BFF/RPC 二分）
 
@@ -130,8 +128,9 @@ profile 由「namespace 启发式 + 项目特判」推导出**默认值**，用�
 - **两类校验必须分离**（委员会共识）：
   - **字段校验**（确定性错误）：缺配置字段 → fail-fast 报错，带字段名与设置页路径
   - **前提确认**（概率性错误）：组织路由启用器缺失 → 只能提示确认，**不能验证、不能报「已通过」**——插件探测不到集群侧状态，措辞必须是「前提确认」而非「检查通过」，防仪式感幻觉
-- **强制不变式**：`forceIndependentMqGroup` 恒校验、绝不进 optional（影子实例抢 dev MQ 消息是安全问题，不是可用性问题）。
-- **audit 文件**：init 产出 `.localdebug.audit.json`——routingEnabler.requiredOrgComponents 逐条对照，标「confirmed | unconfirmed」；不阻塞 init，但 ToolWindow 常驻未确认告警（「N 项前提未确认 = 调试可能静默失败」）。文件留在项目根，可 review、可贴给组织基建团队。
+- **强制不变式**：`forceIndependentMqGroup` 恒校验、绝不进 optional（影子实例抢 dev MQ 消息是安全问题，不是可用性问题）。P1 实现语义：validation.forced 与 safety.forceIndependentMqGroup 二者取或（防死字段）；证据键 `mqConsumersConfigured`（=消费者列表已配置，文案已按此降级；「消费组是否真与 dev 隔离」的强校验留 P2/P3）。
+- **audit 文件**：init 产出 `.localdebug.audit.json`——routingEnabler.requiredOrgComponents 逐条 unconfirmed 清单（无确认通道，P3 向导时补 confirmed 流）；不阻塞 init；通知经 invokeLater 派发到 EDT（后台线程安全）。文件留在项目根，可 review、可贴给组织基建团队。
+- **H2 实现说明**：P1 采用「实际使用的占位符检查」——MiddlewarePatchUtil 收集被使用但解析为空的占位符 → 映射配置字段名报错（缺什么报什么）；原「patch 挂 requires 声明」方案降级，P3 再评估。replace 侧：nacos 配置文本含 `${mainServiceRamRoleName}` 而 ramRole 未配 → 报错退出，不再写占位符字面量。
 - **描述符元校验**：describeor 加载时做 schema 校验（schemaVersion）+ 引用检查（registryPatch 引用键存在、mode 声明与 routingEnabler 键一致、proxyModel × runtimeEnv 交叉合法）——数据写错一个键 = 新式静默失败，必须比代码 bug 更早暴露。
 - `validation.required`（如 configCenterAddr）恒校验；其余按需。
 - 空配置可启动（不再全有或全无），缺什么报什么（带字段名与所在的设置页路径）。
@@ -142,7 +141,7 @@ profile 由「namespace 启发式 + 项目特判」推导出**默认值**，用�
 |---|---|---|
 | nacosNamespaceMap（H3） | `~/.localdebug/config/namespace-map.json` | jar 内旧值（标注 deprecated） |
 | serviceType 推导规则（H3） | `~/.localdebug/config/project-rules.json` | jar 内旧值 |
-| pom 依赖默认模板（H4） | `~/.localdebug/config/dependency-template.json` | 空数组（新团队零污染 init） |
+| pom 依赖默认模板（H4） | `~/.localdebug/config/dependency-template.json` | 内置回退旧值（保回归）；用户写 `[]` 即达成新团队零污染 |
 | 工具下载 URL（H5） | config.json（已在，仅默认值出包） | 留空引导首次配置 |
 
 ## 3. 关键类设计
@@ -171,10 +170,10 @@ engine/DescriptorValidator                          // ★ schema 校验 + 引�
 engine/RollbackPlanner                              // ★ rollback 动作按 proxyModel 分化：mesh-service=recover{svc}；intercept=un-intercept；portforward=无动作（防影子 Service 残留污染 dev）
 
 // ★ L3 预留接缝（全行业愿景）：只建接口签名，实现按真实需求后补，内核不为此改动
-bridge/ProxyBridge                                  // 流量通路抽象：start/stop/rollback/discoverResources
-                                                    //   实现① KtConnectBridge（P1 落地，内部仍用模板数据 + 信号文件）
-                                                    //   未来：TelepresenceBridge / DirectBridge / 非K8s(docker-compose) 通路
-project/ProjectAdapter                              // 语言/构建适配：discoverConfigFiles / injectPatches / findEntryPoint / rewriteBuildFile
+bridge/ProxyBridge                                  // 流量通路抽象（已落地签名）：start/stop/isRunning/hasRunningProcesses/getRunningProcessesInfo/stopAll
+                                                    //   实现① KtConnectBridge（P1 落地，模板数据 + 信号文件 + M5 命令守卫 + PATH 前置）
+                                                    //   未来：TelepresenceBridge / DirectBridge / 非K8s(docker-compose) 通路（rollback/discoverResources 待接线时补签名）
+project/ProjectAdapter                              // 语言/构建适配（未建，接缝声明）：discoverConfigFiles / injectPatches / findEntryPoint / rewriteBuildFile
                                                     //   实现① MavenSpringAdapter（P1 只做收敛准备：配置文件发现收敛为单一方法）
                                                     //   未来：GradleAdapter / GoKratosAdapter / NodeNestAdapter
 // 注：染色跨协议（gRPC metadata 等）仍走 routingEnabler 数据 + L4 前提声明，不需要新接口
@@ -184,7 +183,7 @@ project/ProjectAdapter                              // 语言/构建适配：dis
 
 **改造清单（对照审查问题）**：
 - `ProjectInitAction`：H2 dubbo/nacos 键删 → RegistryPatchApplier；H3 出包；H1 改 ValidationEngine；服务名推导算法保留（编辑距离+粗筛，通用），namespace 过滤（dev1）→ 描述符/配置
-- `ProjectReplaceAction`：M3 producers 重写 → patches；M5 占位符表 → 数据；M8 模板 → 描述符；jvmrc 生成读描述符 dyeing 段
+- `ProjectReplaceAction`：M3 producers 重写 → patches（P1 已接线：读 middlewareGroup.producersKey）；M5 占位符表 → 数据（TODO P2，仍硬编码 `${mainServiceRamRoleName}`）；M8 模板 → 描述符（已接线）；jvmrc 生成读描述符 routingEnabler 段（已接线，rpcPort 与 init 同源 forcedRpcPort）
 - `ConfigManager`：原子写（tmp+rename）、解析失败保留原文件、单例
 - `PortUtil`：synchronized 分配段
 - ktctl 命令启动（DebugCommandService.start）顺带修两隐患：PATH 注入 `~/.localdebug/bin` + 参数改 `cmd /c`/`sh -c` 整串执行（避免空白切分）
