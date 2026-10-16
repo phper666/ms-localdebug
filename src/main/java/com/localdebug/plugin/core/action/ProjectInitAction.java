@@ -12,6 +12,7 @@ import com.aliyun.sts20150401.models.AssumeRoleResponseBody;
 import com.intellij.notification.Notification;
 import com.intellij.notification.NotificationType;
 import com.intellij.notification.Notifications;
+import com.intellij.openapi.application.ApplicationManager;
 import com.localdebug.plugin.core.cloud.ALiYunClient;
 import com.localdebug.plugin.core.config.ALiYunConfig;
 import com.localdebug.plugin.core.config.ALiYunTemporaryCredentials;
@@ -82,7 +83,6 @@ public class ProjectInitAction implements Action {
     private final DescriptorLoader descriptorLoader = new DescriptorLoader();
     private final DescriptorValidator descriptorValidator = new DescriptorValidator();
     private final ValidationEngine validationEngine = new ValidationEngine();
-    private final RegistryPatchApplier registryPatchApplier = new RegistryPatchApplier();
 
     /**
      * 执行初始化配置操作
@@ -102,11 +102,17 @@ public class ProjectInitAction implements Action {
             return;
         }
 
-        // 加载并校验栈描述符（描述符错误 = 新式静默失败，必须早暴露）
-        StackDescriptor desc = descriptorLoader.load(null);
-        List<String> descViolations = descriptorValidator.validate(desc);
-        if (!descViolations.isEmpty()) {
-            LogOutputUtil.error(logger, "栈描述符校验失败: " + String.join("; ", descViolations));
+        // 加载并校验栈描述符（描述符错误 = 新式静默失败，必须早暴露；加载异常统一转 IllegalArgumentException）
+        StackDescriptor desc;
+        try {
+            desc = descriptorLoader.load(null);
+            List<String> descViolations = descriptorValidator.validate(desc);
+            if (!descViolations.isEmpty()) {
+                LogOutputUtil.error(logger, "栈描述符校验失败: " + String.join("; ", descViolations));
+                return;
+            }
+        } catch (RuntimeException e) {
+            LogOutputUtil.error(logger, "栈描述符加载失败: " + e.getMessage());
             return;
         }
         this.nacosNamespaceJsonObj = loadNamespaceMap();
@@ -133,7 +139,7 @@ public class ProjectInitAction implements Action {
         // 分级校验引擎（H1）：required 缺失 fail-fast；强制不变式（MQ 独立消费组）恒校验
         Map<String, Object> configSnapshot = new HashMap<>();
         configSnapshot.put("configCenterAddr", aliYunConfig.getNacosServerAddr());
-        configSnapshot.put(ValidationEngine.SNAPSHOT_KEY_MQ_CONSUMER_GROUP_ISOLATED,
+        configSnapshot.put(ValidationEngine.SNAPSHOT_KEY_MQ_CONSUMERS_CONFIGURED,
                 !ObjectUtil.isEmpty(aliYunConfig.getMqConsumers()));
         ValidationResult validationResult = validationEngine.check(desc, configSnapshot, new ArrayList<>(), new ArrayList<>());
         if (!validationResult.getMissingRequired().isEmpty()) {
@@ -213,18 +219,12 @@ public class ProjectInitAction implements Action {
                 continue;
             }
             if (searchConfigFile.getName().equals(QUERY_BOOTSTRAP_YAML)) {
-                JSONObject projectBootstrapConfig = new JSONObject(JSONConfig.create().setIgnoreNullValue(false));
-                projectBootstrapConfig.putByPath("spring.cloud.nacos.config.server-addr", aliYunConfig.getNacosServerAddr());
-                projectBootstrapConfig.putByPath("spring.application.name", "application-localdebug");
-                replaceConfig.setProjectBootstrapConfig(projectBootstrapConfig);
+                // bootstrapPatch 内容由 composeApplicationPatch 按描述符写入（bootstrap: 前缀分流），
+                // 此处仅创建承接对象（保持旧语义：仅 bootstrap.yaml 才有该对象）
+                replaceConfig.setProjectBootstrapConfig(new JSONObject(JSONConfig.create().setIgnoreNullValue(false)));
             }
 
             Optional<SpringBootConfig> optionalSpringBootConfig = Optional.of(springBootConfig);
-            JSONObject projectApplicationConfig = new JSONObject(JSONConfig.create().setIgnoreNullValue(false));
-            if (optionalSpringBootConfig.map(SpringBootConfig::getConfig).map(SpringBootConfig.Config::getImportValue).orElse(null) != null) {
-                projectApplicationConfig.putByPath("spring.cloud.nacos.config.import-check.enabled", false);
-            }
-
             replaceConfig.setAppName(optionalSpringBootConfig.map(SpringBootConfig::getApplication).map(SpringBootConfig.Application::getName).orElse(null));
             if (ObjectUtil.isEmpty(replaceConfig.getAppName())) {
                 LogOutputUtil.error(logger, "spring.application.name cannot be empty");
@@ -232,7 +232,7 @@ public class ProjectInitAction implements Action {
             }
             setReplaceConfig(replaceConfig, optionalSpringBootConfig, namespaceServiceMap, projectPath);
 
-            // RegistryPatchApplier（H2）：registryPatch + extraApplicationPatch + bootstrapPatch → 路径→值
+            // registryPatch + extraApplicationPatch + bootstrapPatch + 中间件 patch 组合（可测静态方法，顺序与旧 putByPath 逐键一致）
             Map<String, Object> registryContext = new HashMap<>();
             registryContext.put("app", replaceConfig.getAppName());
             registryContext.put("tag", replaceConfig.getTag());
@@ -241,32 +241,20 @@ public class ProjectInitAction implements Action {
             registryContext.put("configCenterAddr", aliYunConfig.getNacosServerAddr());
             Integer forcedRpcPort = desc.getRoutingEnabler() != null ? desc.getRoutingEnabler().getForcedRpcPort() : null;
             registryContext.put("rpcPort", forcedRpcPort != null ? forcedRpcPort : DEFAULT_DUBBO_PORT);
-            Map<String, Object> registryApplied = registryPatchApplier.apply(desc, registryContext);
+            boolean importCheckPresent = optionalSpringBootConfig.map(SpringBootConfig::getConfig)
+                    .map(SpringBootConfig.Config::getImportValue).orElse(null) != null;
+            ApplicationPatchComposition composition = composeApplicationPatch(desc, registryContext, importCheckPresent,
+                    replaceConfig.getServiceType(), buildPatchContext(aliYunConfig, tempCredentials, replaceConfig),
+                    replaceConfig.getProjectBootstrapConfig());
+            JSONObject projectApplicationConfig = composition.applicationConfig;
 
-            // import-check 条件写（旧行为：仅项目 yaml 存在 config.import 时写入，且插入顺序最先）
-            String importCheckKey = desc.getRegistryPatch().getImportCheckKey();
-            Boolean importCheckValue = desc.getRegistryPatch().getImportCheckValue();
-            if (importCheckKey != null) {
-                registryApplied.remove(importCheckKey);
-                if (optionalSpringBootConfig.map(SpringBootConfig::getConfig).map(SpringBootConfig.Config::getImportValue).orElse(null) != null) {
-                    projectApplicationConfig.putByPath(importCheckKey, importCheckValue);
-                }
+            // H2 空占位符检查：只用到的 patch 才要求对应字段（缺什么报什么）
+            List<String> missingPatchFields = missingPatchFields(composition.emptyPlaceholders);
+            if (!missingPatchFields.isEmpty()) {
+                LogOutputUtil.error(logger, "阿里云配置缺失必需字段（被中间件 patch 引用且解析为空）: "
+                        + String.join(", ", missingPatchFields));
+                return;
             }
-            for (Map.Entry<String, Object> entry : registryApplied.entrySet()) {
-                String path = entry.getKey();
-                if (path.startsWith("bootstrap:")) {
-                    if (replaceConfig.getProjectBootstrapConfig() != null) {
-                        replaceConfig.getProjectBootstrapConfig().putByPath(path.substring("bootstrap:".length()), entry.getValue());
-                    }
-                } else {
-                    projectApplicationConfig.putByPath(path, entry.getValue());
-                }
-            }
-
-            // 中间件相关 yaml patch（churchill.rocketmq.* / churchill.scheduler.* / alicloud.kms.* / server.port）
-            // 数据化存放于 classpath: middleware-patches.json，由通用 patch 应用器遍历执行
-            Map<String, Object> patchContext = buildPatchContext(aliYunConfig, tempCredentials, replaceConfig);
-            MiddlewarePatchUtil.applyPatches(projectApplicationConfig, replaceConfig.getServiceType(), patchContext);
 
             replaceConfig.setProjectApplicationConfig(projectApplicationConfig);
             if (ObjectUtil.isEmpty(replaceConfig.getAppName())) {
@@ -297,25 +285,116 @@ public class ProjectInitAction implements Action {
     }
 
     /**
-     * H3a namespace-map 出包：用户文件优先，缺失回退 jar 内置
+     * 中间件 patch 占位符 → 阿里云配置字段名（H2：仅这些字段缺失时按「缺什么报什么」报错；
+     * sts 凭证 / mqConsumers / 端口等派生或非字段值不在此列）
+     */
+    static final Map<String, String> PATCH_PLACEHOLDER_FIELDS = Map.of(
+            "mqAddr", "mqAddr",
+            "roleArn", "roleArn",
+            "accessKey", "accessKey",
+            "secretKey", "secretKey",
+            "schedulerNamespace", "schedulerNamespace",
+            "schedulerGroupId", "schedulerGroupId",
+            "schedulerAppKey", "schedulerAppKey");
+
+    /**
+     * 空占位符 → 缺失字段名（保序去重）；不在映射内的占位符（派生值/非配置字段）不报
+     */
+    static List<String> missingPatchFields(List<String> emptyPlaceholders) {
+        List<String> missing = new ArrayList<>();
+        for (String placeholder : emptyPlaceholders) {
+            String field = PATCH_PLACEHOLDER_FIELDS.get(placeholder);
+            if (field != null && !missing.contains(field)) {
+                missing.add(field);
+            }
+        }
+        return missing;
+    }
+
+    /**
+     * init 侧 application patch 组合（可测静态方法）：import-check 条件写 → registryPatch 展开
+     * → 中间件 patch，键序与改造前 putByPath + patch 顺序逐键一致。
+     * bootstrapPatch 条目分流写入 bootstrapSink（bootstrap 文档），不进 application 文档。
+     *
+     * @param registryContext    registryPatch 占位符上下文
+     * @param importCheckPresent 项目 yaml 是否存在 spring.cloud.nacos.config.import
+     * @param bootstrapSink      bootstrap 写入目标（JSONObject，putByPath 嵌套写；可为 null）
+     * @return 组合结果（application 配置 + 被使用但解析为空的占位符清单）
+     */
+    static ApplicationPatchComposition composeApplicationPatch(StackDescriptor desc, Map<String, Object> registryContext,
+                                                               boolean importCheckPresent, String serviceType,
+                                                               Map<String, Object> patchContext,
+                                                               JSONObject bootstrapSink) {
+        JSONObject projectApplicationConfig = new JSONObject(JSONConfig.create().setIgnoreNullValue(false));
+        Map<String, Object> registryApplied = new RegistryPatchApplier().apply(desc, registryContext);
+
+        // import-check 条件写（旧行为：仅项目 yaml 存在 config.import 时写入，且插入顺序最先）
+        String importCheckKey = desc.getRegistryPatch().getImportCheckKey();
+        if (importCheckKey != null && registryApplied.containsKey(importCheckKey)) {
+            Object importCheckValue = registryApplied.remove(importCheckKey);
+            if (importCheckPresent) {
+                projectApplicationConfig.putByPath(importCheckKey, importCheckValue);
+            }
+        }
+        for (Map.Entry<String, Object> entry : registryApplied.entrySet()) {
+            String path = entry.getKey();
+            if (path.startsWith("bootstrap:")) {
+                if (bootstrapSink != null) {
+                    // putByPath 嵌套写（与旧硬编码一致），bootstrap.yaml 深合并依赖嵌套结构
+                    bootstrapSink.putByPath(path.substring("bootstrap:".length()), entry.getValue());
+                }
+            } else {
+                projectApplicationConfig.putByPath(path, entry.getValue());
+            }
+        }
+
+        // 中间件相关 yaml patch（churchill.rocketmq.* / churchill.scheduler.* / alicloud.kms.* / server.port）
+        // 数据化存放于 classpath: middleware-patches.json，由通用 patch 应用器遍历执行
+        List<String> emptyPlaceholders = MiddlewarePatchUtil.applyPatches(projectApplicationConfig, serviceType, patchContext);
+        return new ApplicationPatchComposition(projectApplicationConfig, emptyPlaceholders);
+    }
+
+    /**
+     * composeApplicationPatch 结果：application 配置 + 被使用但解析为空的占位符
+     */
+    static class ApplicationPatchComposition {
+        final JSONObject applicationConfig;
+        final List<String> emptyPlaceholders;
+
+        ApplicationPatchComposition(JSONObject applicationConfig, List<String> emptyPlaceholders) {
+            this.applicationConfig = applicationConfig;
+            this.emptyPlaceholders = emptyPlaceholders;
+        }
+    }
+
+    /**
+     * H3a namespace-map 出包：用户文件优先，解析失败回退 jar 内置（H3：用户文件损坏不崩 init）
      */
     private JSONObject loadNamespaceMap() {
         Path userFile = getUserConfigDir().resolve("namespace-map.json");
         if (Files.exists(userFile)) {
-            log.info("使用用户 namespace-map: {}", userFile);
-            return JSONUtil.parseObj(FileUtil.readUtf8String(userFile.toFile()));
+            try {
+                log.info("使用用户 namespace-map: {}", userFile);
+                return JSONUtil.parseObj(FileUtil.readUtf8String(userFile.toFile()));
+            } catch (Exception e) {
+                log.warn("用户 namespace-map 解析失败，回退内置值: {}", userFile, e);
+            }
         }
         return InternalFileUtil.getPluginResourcesConfig(CLASS_RESOURCE_NACOS_NAMESPACE_MAP);
     }
 
     /**
-     * H3b serviceType 规则出包：用户文件优先，缺失回退与改造前硬编码等价的默认规则
+     * H3b serviceType 规则出包：用户文件优先，解析失败回退与改造前硬编码等价的默认规则（H3）
      */
     private JSONObject loadProjectRules() {
         Path userFile = getUserConfigDir().resolve("project-rules.json");
         if (Files.exists(userFile)) {
-            log.info("使用用户 project-rules: {}", userFile);
-            return JSONUtil.parseObj(FileUtil.readUtf8String(userFile.toFile()));
+            try {
+                log.info("使用用户 project-rules: {}", userFile);
+                return JSONUtil.parseObj(FileUtil.readUtf8String(userFile.toFile()));
+            } catch (Exception e) {
+                log.warn("用户 project-rules 解析失败，回退内置规则: {}", userFile, e);
+            }
         }
         // TODO(P3): project-rules 的 UI 编辑入口（设置页），当前仅保留 json 编辑通道
         return defaultProjectRules();
@@ -365,7 +444,7 @@ public class ProjectInitAction implements Action {
     }
 
     /**
-     * 组织前提确认清单（.localdebug.audit.json）：逐条 confirmed=false，不阻塞 init
+     * 组织前提 unconfirmed 清单（.localdebug.audit.json）：逐条 confirmed=false；无确认通道，P3 向导时补
      */
     private void writeAuditFile(String projectPath, StackDescriptor desc, ValidationEngine.ValidationResult validationResult) {
         try {
@@ -389,7 +468,8 @@ public class ProjectInitAction implements Action {
     }
 
     /**
-     * 组织前提未确认提示（仅一次；audit 文件为权威记录）
+     * 组织前提未确认提示（仅一次；audit 文件为权威记录）；
+     * Action 运行在后台线程 → 派发到 EDT 发送（M4；编译基线 2023.1 无 Bus.notifyLater，用 invokeLater 等价）
      */
     private void notifyPrecheckUnconfirmed(int count) {
         if (count <= 0) {
@@ -399,7 +479,7 @@ public class ProjectInitAction implements Action {
             Notification notification = new Notification("LocalDebug", "LocalDebug",
                     "有 " + count + " 项组织路由前提未确认（详见项目根 .localdebug.audit.json），调试可能静默失败",
                     NotificationType.WARNING);
-            Notifications.Bus.notify(notification);
+            ApplicationManager.getApplication().invokeLater(() -> Notifications.Bus.notify(notification));
         } catch (Exception e) {
             log.debug("组织前提通知发送失败", e);
         }
@@ -581,7 +661,9 @@ public class ProjectInitAction implements Action {
         JSONArray bffPathRules = rules.getJSONArray("bffPathRules");
         if (bffPathRules != null) {
             for (Object ruleObj : bffPathRules) {
-                JSONObject rule = (JSONObject) ruleObj;
+                if (!(ruleObj instanceof JSONObject rule)) {
+                    continue; // 脏元素跳过（H3：用户规则文件可能被手工改坏）
+                }
                 String nsPattern = rule.getStr("namespaceContains", "");
                 String pathPattern = rule.getStr("pathContains", "");
                 if (StrUtil.isBlank(nsPattern) || StrUtil.isBlank(pathPattern)) {
@@ -595,7 +677,9 @@ public class ProjectInitAction implements Action {
         JSONArray bffAppRules = rules.getJSONArray("bffAppRules");
         if (bffAppRules != null) {
             for (Object ruleObj : bffAppRules) {
-                JSONObject rule = (JSONObject) ruleObj;
+                if (!(ruleObj instanceof JSONObject rule)) {
+                    continue; // 脏元素跳过
+                }
                 String nsPattern = rule.getStr("namespaceContains", "");
                 String appName = rule.getStr("appName", "");
                 if (StrUtil.isBlank(nsPattern) || StrUtil.isBlank(appName)) {
@@ -632,7 +716,9 @@ public class ProjectInitAction implements Action {
         for (JSONArray rules : new JSONArray[]{pathRules, appRules}) {
             if (rules != null) {
                 for (Object ruleObj : rules) {
-                    JSONObject rule = (JSONObject) ruleObj;
+                    if (!(ruleObj instanceof JSONObject rule)) {
+                        continue; // 脏元素跳过
+                    }
                     String nsPattern = rule.getStr("namespaceContains", "");
                     if (StrUtil.isNotBlank(nsPattern) && k8sServiceNamespace.contains(nsPattern)) {
                         return true;

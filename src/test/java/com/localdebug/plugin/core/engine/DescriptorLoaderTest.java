@@ -11,6 +11,7 @@ import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -107,5 +108,41 @@ class DescriptorLoaderTest {
     @Test
     void missingStack_throws() {
         assertThrows(IllegalArgumentException.class, () -> loader.load("no-such-stack"));
+    }
+
+    @Test
+    void inherits_deleteSentinel_removesKey() {
+        // M2：删除继承键用 {"$delete": true} 哨兵；null 保留写 null 语义
+        FileUtil.mkdir(userStacksDir().toFile());
+        String child = "{\"stack\":\"child\",\"inherits\":\"builtin:sca-dubbo-ktctl\","
+                + "\"registryPatch\":{\"discoveryIpKey\":{\"$delete\":true}}}";
+        FileUtil.writeUtf8String(child, userStacksDir().resolve("child.json").toFile());
+
+        StackDescriptor desc = loader.load("child");
+
+        assertNull(desc.getRegistryPatch().getDiscoveryIpKey(), "$delete 应删除继承的键");
+        assertEquals("spring.cloud.nacos.discovery.port", desc.getRegistryPatch().getDiscoveryPortKey(),
+                "其它键不受影响");
+    }
+
+    @Test
+    void inherits_nullValue_preserved() {
+        // M2：子层 null 原样保留（覆盖父层值为 null，而非删除键）
+        FileUtil.mkdir(userStacksDir().toFile());
+        String child = "{\"stack\":\"child\",\"inherits\":\"builtin:sca-dubbo-ktctl\","
+                + "\"registryPatch\":{\"discoveryPortKey\":null,\"discoveryPortValue\":null}}";
+        FileUtil.writeUtf8String(child, userStacksDir().resolve("child.json").toFile());
+
+        StackDescriptor desc = loader.load("child");
+
+        assertNull(desc.getRegistryPatch().getDiscoveryPortKey(), "子层 null 应覆盖父层值");
+        assertNull(desc.getRegistryPatch().getDiscoveryPortValue(), "子层 null 应覆盖父层值");
+    }
+
+    @Test
+    void stackNameWithTraversal_rejected() {
+        // L5：路径穿越防护
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () -> loader.load("../evil"));
+        assertTrue(ex.getMessage().contains("非法栈名"), "应报非法栈名: " + ex.getMessage());
     }
 }

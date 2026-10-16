@@ -26,6 +26,8 @@ public class PortUtil {
     private static final int DEFAULT_START_PORT = 8080;
     /** 系统属性可覆盖配置根目录（测试隔离用），生产默认 ~/.localdebug/config */
     private static final String CONFIG_DIR_OVERRIDE_PROP = "localdebug.config.dir";
+    /** 磁盘 ports.json 解析失败标记：为 true 时拒绝覆盖保存，防止损坏文件被空配置清空（同 ConfigManager 保护） */
+    private static volatile boolean portConfigCorrupt = false;
 
     /**
      * 获取项目端口配置文件路径
@@ -48,6 +50,7 @@ public class PortUtil {
     private static JSONObject getOrCreatePortConfig() {
         Path configPath = getPortConfigFilePath();
         File configFile = new File(configPath.toUri());
+        portConfigCorrupt = false;
         
         // 如果配置文件不存在，创建一个新的
         if (!configFile.exists()) {
@@ -72,7 +75,9 @@ public class PortUtil {
             }
             return JSONUtil.parseObj(content);
         } catch (Exception e) {
-            log.error("Failed to read port config file, using empty config", e);
+            // 解析失败：使用空配置继续分配，但标记损坏，保存时拒绝覆盖原文件
+            portConfigCorrupt = true;
+            log.error("Failed to read port config file, using empty config (原文件保留，不覆盖)", e);
             return new JSONObject();
         }
     }
@@ -83,6 +88,10 @@ public class PortUtil {
      * @param config 端口配置
      */
     private static void savePortConfig(JSONObject config) {
+        if (portConfigCorrupt) {
+            log.warn("ports.json 损坏且不可解析，拒绝覆盖保存，请手动修复");
+            return;
+        }
         try {
             Path configPath = getPortConfigFilePath();
             File configFile = new File(configPath.toUri());

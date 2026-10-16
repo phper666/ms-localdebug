@@ -19,7 +19,7 @@
         "downloadUrl": "https://dl.k8s.io/release/v1.30.14/bin/windows/amd64/kubectl.exe"
       },
       "ktconnect": {
-        "downloadUrl": ""
+        "downloadUrl": "https://github.com/phper666/kt-connect/releases/download/v0.3.7-phper666.2/ktctl_0.3.7-phper666.2_MacOS_x86_64"
       },
       "projectPaths": []
     },

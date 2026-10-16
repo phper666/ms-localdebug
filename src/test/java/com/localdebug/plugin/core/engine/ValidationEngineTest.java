@@ -43,7 +43,7 @@ class ValidationEngineTest {
     void requiredPresent_andForcedSatisfied_isValid() {
         Map<String, Object> snapshot = new HashMap<>();
         snapshot.put("configCenterAddr", "nacos:8848");
-        snapshot.put(ValidationEngine.SNAPSHOT_KEY_MQ_CONSUMER_GROUP_ISOLATED, true);
+        snapshot.put(ValidationEngine.SNAPSHOT_KEY_MQ_CONSUMERS_CONFIGURED, true);
 
         ValidationResult result = engine.check(builtin, snapshot, List.of(), List.of());
 
@@ -61,8 +61,8 @@ class ValidationEngineTest {
         ValidationResult result = engine.check(builtin, snapshot, List.of(), List.of());
 
         assertFalse(result.getForcedViolations().isEmpty());
-        assertTrue(result.getForcedViolations().get(0).contains(ValidationEngine.FORCED_MQ_INDEPENDENT_GROUP),
-                "强制项违规应点名 mqIndependentGroup: " + result.getForcedViolations());
+        assertTrue(result.getForcedViolations().get(0).contains("独立消费组"),
+                "强制项违规应点名独立消费组: " + result.getForcedViolations());
         assertFalse(result.isValid(), "强制项违规时不可通过");
     }
 
@@ -70,7 +70,7 @@ class ValidationEngineTest {
     void precheckEntries_containsOrgComponents() {
         Map<String, Object> snapshot = new HashMap<>();
         snapshot.put("configCenterAddr", "nacos:8848");
-        snapshot.put(ValidationEngine.SNAPSHOT_KEY_MQ_CONSUMER_GROUP_ISOLATED, true);
+        snapshot.put(ValidationEngine.SNAPSHOT_KEY_MQ_CONSUMERS_CONFIGURED, true);
 
         ValidationResult result = engine.check(builtin, snapshot, List.of(), List.of());
 

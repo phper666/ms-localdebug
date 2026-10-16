@@ -3,6 +3,7 @@ package com.localdebug.plugin.core.engine;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.io.resource.ResourceUtil;
 import cn.hutool.core.util.StrUtil;
+import cn.hutool.json.JSONConfig;
 import cn.hutool.json.JSONNull;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
@@ -22,8 +23,10 @@ import java.util.List;
  *   <li>load("xxx") → 用户栈 ~/.localdebug/config/stacks/xxx.json（根目录可用系统属性
  *       localdebug.config.dir 覆盖，测试隔离用，沿用 P0 ConfigManager 模式）</li>
  *   <li>inherits 解析：builtin:&lt;名&gt; 追内置库，裸文件名追用户目录；
- *       合并语义 = 父层字段打底、子层覆盖（嵌套对象递归合并，子层 null 值删除父层键）；
- *       防循环继承（深度上限 5）</li>
+ *       合并语义 = 父层字段打底、子层覆盖（嵌套对象递归合并，子层 null 原样保留（写 null），
+ *       删除键用哨兵 {"$delete": true}）；防循环继承（深度上限 5）</li>
+ *   <li>栈名校验：拒绝 .. 与路径分隔符（防路径穿越）；所有内部异常统一转
+ *       IllegalArgumentException 并带明确消息</li>
  * </ul>
  * 纯 Java，无 IntelliJ 依赖。
  */
@@ -55,7 +58,11 @@ public class DescriptorLoader {
                     + "（疑似循环继承）: " + String.join(" -> ", chain) + " -> " + stackName);
         }
         JSONObject merged = loadMergedJson(stackName, chain, depth);
-        return JSONUtil.toBean(merged, StackDescriptor.class);
+        try {
+            return JSONUtil.toBean(merged, StackDescriptor.class);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("栈描述符字段类型不匹配: " + stackName + "（" + e.getMessage() + "）", e);
+        }
     }
 
     /**
@@ -77,14 +84,15 @@ public class DescriptorLoader {
     }
 
     /**
-     * 深合并：base 打底，override 覆盖；嵌套 JSONObject 递归合并；override 中 null/JSONNull 删除键
+     * 深合并：base 打底，override 覆盖；嵌套 JSONObject 递归合并。
+     * 删除键用独立哨兵 {"$delete": true}；override 中的 null（JSONNull）原样保留（写 null 语义）。
      */
     private JSONObject merge(JSONObject base, JSONObject override) {
-        JSONObject merged = new JSONObject();
+        JSONObject merged = new JSONObject(JSONConfig.create().setIgnoreNullValue(false));
         merged.putAll(base);
         for (String key : override.keySet()) {
             Object value = override.get(key);
-            if (value == null || value instanceof JSONNull) {
+            if (value instanceof JSONObject obj && Boolean.TRUE.equals(obj.getBool("$delete"))) {
                 merged.remove(key);
                 continue;
             }
@@ -99,13 +107,18 @@ public class DescriptorLoader {
     }
 
     /**
-     * 读取原始 JSON（不做继承合并）
+     * 读取原始 JSON（不做继承合并）；null 保留（M2：子层 null 需原样保留）
      */
     private JSONObject readRawJson(String stackName) {
+        validateStackName(stackName);
         String json;
         if (stackName.startsWith(BUILTIN_PREFIX)) {
             String builtinName = stackName.substring(BUILTIN_PREFIX.length());
-            json = ResourceUtil.readUtf8Str(BUILTIN_STACK_DIR + builtinName + ".json");
+            try {
+                json = ResourceUtil.readUtf8Str(BUILTIN_STACK_DIR + builtinName + ".json");
+            } catch (Exception e) {
+                throw new IllegalArgumentException("内置栈不存在或不可读: " + builtinName, e);
+            }
             if (json == null) {
                 throw new IllegalArgumentException("内置栈不存在: " + builtinName);
             }
@@ -114,9 +127,29 @@ public class DescriptorLoader {
             if (!Files.exists(userFile)) {
                 throw new IllegalArgumentException("用户栈不存在: " + stackName + "（" + userFile + "）");
             }
-            json = FileUtil.readUtf8String(userFile.toFile());
+            try {
+                json = FileUtil.readUtf8String(userFile.toFile());
+            } catch (Exception e) {
+                throw new IllegalArgumentException("用户栈不可读: " + stackName + "（" + userFile + "）", e);
+            }
         }
-        return JSONUtil.parseObj(json);
+        try {
+            return JSONUtil.parseObj(json, JSONConfig.create().setIgnoreNullValue(false));
+        } catch (Exception e) {
+            throw new IllegalArgumentException("栈 JSON 解析失败: " + stackName + "（" + e.getMessage() + "）", e);
+        }
+    }
+
+    /**
+     * 栈名校验（L5）：拒绝 .. 与路径分隔符，防路径穿越
+     */
+    private static void validateStackName(String stackName) {
+        String name = stackName.startsWith(BUILTIN_PREFIX)
+                ? stackName.substring(BUILTIN_PREFIX.length())
+                : stackName;
+        if (name.contains("..") || name.contains("/") || name.contains("\\")) {
+            throw new IllegalArgumentException("非法栈名: " + stackName + "（不允许 .. 或路径分隔符）");
+        }
     }
 
     /**

@@ -104,4 +104,55 @@ class DescriptorValidatorTest {
         assertTrue(violations.stream().anyMatch(v -> v.contains("schemaVersion") && v.contains("2")),
                 "schemaVersion=2 应报不支持: " + violations);
     }
+
+    @Test
+    void templateWithoutKey_reported() {
+        // H1：typo 场景模拟——模板有值但 Key 为空（真实场景：discoveryIpKeyy 拼错被丢弃后 Key 为 null）
+        builtin.getRegistryPatch().setDiscoveryIpKey(null);
+
+        List<String> violations = validator.validate(builtin);
+
+        assertTrue(violations.stream().anyMatch(v ->
+                        v.contains("discoveryIpTemplate") && v.contains("discoveryIpKey")),
+                "有值模板缺 Key 应报（该模板会被静默丢弃）: " + violations);
+    }
+
+    @Test
+    void nullKeyWithoutPairValue_allowed() {
+        // eureka 场景：discoveryPortKey 显式 null 且无配对值 → 未使用的键，应允许
+        builtin.getRegistryPatch().setDiscoveryPortKey(null);
+        builtin.getRegistryPatch().setDiscoveryPortValue(null);
+
+        List<String> violations = validator.validate(builtin);
+
+        assertTrue(violations.stream().noneMatch(v -> v.contains("discoveryPortKey")),
+                "未使用的 Key（null 且无配对值）不应报违规: " + violations);
+    }
+
+    @Test
+    void badPlaceholderForms_reported() {
+        // 下划线形态（旧正则 [a-zA-Z] 不可见）
+        builtin.getRegistryPatch().setDiscoveryIpTemplate("{svc}.{config_center_addr}.local");
+        List<String> v1 = validator.validate(builtin);
+        assertTrue(v1.stream().anyMatch(v -> v.contains("config_center_addr")),
+                "下划线占位符应报不在词汇表: " + v1);
+
+        // 空 token {}
+        builtin.getRegistryPatch().setDiscoveryIpTemplate("{}");
+        List<String> v2 = validator.validate(builtin);
+        assertTrue(v2.stream().anyMatch(v -> v.contains("不在词汇表")),
+                "空 token {} 应报不在词汇表: " + v2);
+
+        // 双层花括号 → 裸括号残留
+        builtin.getRegistryPatch().setDiscoveryIpTemplate("{{svc}}");
+        List<String> v3 = validator.validate(builtin);
+        assertTrue(v3.stream().anyMatch(v -> v.contains("未配对")),
+                "{{svc}} 应报未配对的括号: " + v3);
+
+        // ${} 与 {} 语法混用
+        builtin.getRegistryPatch().setDiscoveryIpTemplate("${tag}");
+        List<String> v4 = validator.validate(builtin);
+        assertTrue(v4.stream().anyMatch(v -> v.contains("${...}")),
+                "${tag} 混用语法应报: " + v4);
+    }
 }

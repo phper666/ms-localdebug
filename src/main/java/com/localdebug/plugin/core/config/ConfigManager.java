@@ -15,7 +15,7 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
-import java.nio.file.AtomicMoveNotSupportedException;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -111,8 +111,11 @@ public class ConfigManager {
 
     /**
      * 保存配置文件（原子写：tmp 文件 + move 覆盖；损坏保护：磁盘文件不可解析时拒绝写入）
+     *
+     * @return true = 已保存；false = 被拒绝（磁盘文件损坏）或保存失败（调用方需感知，不再静默）
      */
-    public void saveConfig() {
+    public boolean saveConfig() {
+        Path tmpPath = null;
         try {
             Path configDir = getUserConfigDirectory();
             if (!Files.exists(configDir)) {
@@ -120,24 +123,37 @@ public class ConfigManager {
             }
 
             Path configPath = configDir.resolve(CONFIG_FILE_NAME);
+            // 损坏保护复检：磁盘文件已被手工修好（可解析）则放行保存
             if (invalidOnDisk && !isFileParseable(configPath)) {
                 log.warn("磁盘配置文件损坏且不可解析，拒绝覆盖保存，请手动修复: {}", configPath);
-                return;
+                return false;
             }
 
             String json = GSON.toJson(config);
-            Path tmpPath = configDir.resolve(CONFIG_FILE_NAME + ".tmp");
+            tmpPath = configDir.resolve(CONFIG_FILE_NAME + ".tmp");
             FileUtil.writeUtf8String(json, tmpPath.toFile());
             try {
                 Files.move(tmpPath, configPath, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-            } catch (AtomicMoveNotSupportedException e) {
-                log.debug("原子移动不受支持，降级为普通移动: {}", configPath);
+            } catch (IOException e) {
+                // 原子移动不受支持或失败（如跨文件系统），降级为普通移动
+                log.debug("原子移动不可用，降级为普通移动: {}", configPath);
                 Files.move(tmpPath, configPath, StandardCopyOption.REPLACE_EXISTING);
             }
+            tmpPath = null;
             invalidOnDisk = false;
             log.info("配置已保存到: {}", configPath);
+            return true;
         } catch (Exception e) {
             log.error("保存配置文件失败", e);
+            return false;
+        } finally {
+            if (tmpPath != null) {
+                try {
+                    Files.deleteIfExists(tmpPath);
+                } catch (IOException ignored) {
+                    // tmp 清理失败不影响保存结果
+                }
+            }
         }
     }
 
@@ -168,8 +184,8 @@ public class ConfigManager {
             }
 
             this.config = GSON.fromJson(json, Config.class);
-            saveConfig();
-            return true;
+            // 透传保存结果：损坏保护拒绝/写盘失败时调用方需感知（不再静默返回 true）
+            return saveConfig();
         } catch (JsonSyntaxException e) {
             log.error("JSON格式错误", e);
             return false;

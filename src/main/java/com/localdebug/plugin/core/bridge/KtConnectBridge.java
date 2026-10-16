@@ -23,7 +23,7 @@ import java.util.function.Consumer;
  * ktctl 隧道通路实现（原 DebugCommandService 进程管理搬入，行为保留）：
  * <ul>
  *   <li>信号文件停止语义：ktctl-*-signal-&lt;pid&gt; 内容 "stop"，失败回退 destroy + 超时强杀</li>
- *   <li>PATH 注入：启动前把 ~/.localdebug/bin 追加进环境 PATH（ktctl 依赖 bin 内工具）</li>
+ *   <li>PATH 注入：启动前把 ~/.localdebug/bin 前置进环境 PATH（ktctl 依赖 bin 内工具）</li>
  *   <li>整串执行：命令按 OS 用 sh -c / cmd /c 包裹，消除空白切分 bug</li>
  * </ul>
  */
@@ -35,6 +35,11 @@ public class KtConnectBridge implements ProxyBridge {
 
     @Override
     public synchronized void start(String name, String command, String workDir, Consumer<String> logger) {
+        // M5 入口守卫：命令含未填写占位符（<...>）或引号不配对 → 拒绝启动（避免 ktctl 收到脏命令后静默失败）
+        if (hasUnfilledPlaceholderOrUnbalancedQuotes(command)) {
+            LogOutputUtil.error(logger, "命令包含未填写的占位符（<...>）或引号不配对，已拒绝启动；请先填写服务名/命名空间: " + command);
+            return;
+        }
         if (isRunning(name)) {
             LogOutputUtil.log(logger, "命令 '" + name + "' 正在运行中，先停止后重新启动");
             stop(name, logger);
@@ -48,7 +53,7 @@ public class KtConnectBridge implements ProxyBridge {
             ProcessBuilder processBuilder = new ProcessBuilder(cmdArray);
             processBuilder.directory(new File(workDir));
             processBuilder.redirectErrorStream(true);
-            // PATH 注入：~/.localdebug/bin 追加（M8 顺带修复）
+            // PATH 注入：~/.localdebug/bin 前置（M8 顺带修复）
             String binDir = DirectoryUtil.getToolsBinDir().toString();
             Map<String, String> env = processBuilder.environment();
             String oldPath = env.get("PATH");
@@ -151,6 +156,21 @@ public class KtConnectBridge implements ProxyBridge {
         });
         readerThread.setDaemon(true);
         readerThread.start();
+    }
+
+    /**
+     * M5 命令守卫（可测）：含 &lt; / &gt;（未填写占位符）或单/双引号不配对 → true（拒绝启动）
+     */
+    static boolean hasUnfilledPlaceholderOrUnbalancedQuotes(String command) {
+        if (command == null) {
+            return false;
+        }
+        if (command.contains("<") || command.contains(">")) {
+            return true;
+        }
+        long singleQuotes = command.chars().filter(c -> c == '\'').count();
+        long doubleQuotes = command.chars().filter(c -> c == '"').count();
+        return singleQuotes % 2 != 0 || doubleQuotes % 2 != 0;
     }
 
     /**

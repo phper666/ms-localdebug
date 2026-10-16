@@ -29,6 +29,9 @@
         <applicationConfigurable id="com.localdebug.plugin.settings"
                                  displayName="LocalDebug 微服务调试"
                                  instance="com.localdebug.plugin.ui.settings.LocalDebugSettingsConfigurable"/>
+
+        <!-- 通知分组：后台线程用 Notifications.Bus.notifyLater 发送（EDT 安全） -->
+        <notificationGroup id="LocalDebug" displayType="BALLOON"/>
     </extensions>
     <actions>
 

@@ -17,7 +17,7 @@ import java.util.regex.Pattern;
  * 保证 dubbo.protocol.port 仍为数字、management 仍为 null——产出文件与旧硬编码逐字节一致）。
  * <p>
  * 输出顺序（与旧 ProjectInitAction putByPath 顺序一致）：
- * ① appNameTemplate → "spring.application.name"（schema 无 appNameKey，固定映射）
+ * ① appNameTemplate → appNameKey 路径（无 appNameKey 时回退 "spring.application.name"）
  * ② &lt;prefix&gt;Key+&lt;prefix&gt;Template 配对（Key 值为路径，Template 解析为值）
  * ③ &lt;prefix&gt;Key+&lt;prefix&gt;Value 配对（Key 值为路径，Value 原值）
  * ④ extraApplicationPatch 条目（JSON 声明顺序）
@@ -46,9 +46,12 @@ public class RegistryPatchApplier {
         // ignoreNullValue=false：保留 extraApplicationPatch 中 "management": null 的删除语义
         JSONObject patch = new JSONObject(desc.getRegistryPatch(), JSONConfig.create().setIgnoreNullValue(false));
 
-        // ① appNameTemplate（无 Key 配对）→ spring.application.name
-        if (patch.containsKey("appNameTemplate") && !patch.containsKey("appNameKey")) {
-            resolved.put("spring.application.name", resolveValue(patch.get("appNameTemplate"), context));
+        // ① appNameTemplate → appNameKey 路径（无 appNameKey 时回退 spring.application.name）
+        if (patch.containsKey("appNameTemplate")) {
+            String appNamePath = patch.getStr("appNameKey", "spring.application.name");
+            if (appNamePath != null && !appNamePath.trim().isEmpty()) {
+                resolved.put(appNamePath, resolveValue(patch.get("appNameTemplate"), context));
+            }
         }
         // ②③ Key 配对（Template 优先，其次 Value）
         for (String field : patch.keySet()) {

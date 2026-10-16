@@ -6,7 +6,11 @@ import cn.hutool.json.JSONNull;
 import com.localdebug.plugin.core.constant.Constants;
 import lombok.extern.slf4j.Slf4j;
 
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -34,11 +38,15 @@ public class MiddlewarePatchUtil {
      * @param target      要写入的配置对象（application.yaml 对应的 JSONObject）
      * @param serviceType 服务类型（bff / rpc）
      * @param context     占位符取值上下文
+     * @return 被使用（出现在实际应用的分组模板中）但解析为空的占位符清单（保序去重），
+     * 调用方据此按「缺什么报什么」报错（H2）
      */
-    public static void applyPatches(JSONObject target, String serviceType, Map<String, Object> context) {
+    public static List<String> applyPatches(JSONObject target, String serviceType, Map<String, Object> context) {
         JSONObject patches = loadPatches();
-        applyGroup(target, patches, "common", context);
-        applyGroup(target, patches, serviceType, context);
+        Set<String> emptyPlaceholders = new LinkedHashSet<>();
+        applyGroup(target, patches, "common", context, emptyPlaceholders);
+        applyGroup(target, patches, serviceType, context, emptyPlaceholders);
+        return new ArrayList<>(emptyPlaceholders);
     }
 
     private static JSONObject loadPatches() {
@@ -54,7 +62,8 @@ public class MiddlewarePatchUtil {
         return cached;
     }
 
-    private static void applyGroup(JSONObject target, JSONObject patches, String group, Map<String, Object> context) {
+    private static void applyGroup(JSONObject target, JSONObject patches, String group, Map<String, Object> context,
+                                   Set<String> emptyPlaceholders) {
         JSONObject groupPatches = patches.getJSONObject(group);
         if (groupPatches == null) {
             if (!"common".equals(group)) {
@@ -63,7 +72,26 @@ public class MiddlewarePatchUtil {
             return;
         }
         for (String key : groupPatches.keySet()) {
-            target.putByPath(key, resolveValue(groupPatches.get(key), context));
+            Object template = groupPatches.get(key);
+            collectEmptyPlaceholders(template, context, emptyPlaceholders);
+            target.putByPath(key, resolveValue(template, context));
+        }
+    }
+
+    /**
+     * 收集模板中「被使用但解析为空」的占位符（context 值 null / 空串 / JSONNull）
+     */
+    private static void collectEmptyPlaceholders(Object template, Map<String, Object> context, Set<String> sink) {
+        if (!(template instanceof String str)) {
+            return;
+        }
+        Matcher matcher = PLACEHOLDER.matcher(str);
+        while (matcher.find()) {
+            String name = matcher.group(1);
+            Object value = context.get(name);
+            if (value == null || value instanceof JSONNull || (value instanceof String s && s.isEmpty())) {
+                sink.add(name);
+            }
         }
     }
 

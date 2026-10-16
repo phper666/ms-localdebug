@@ -14,6 +14,9 @@ import java.util.regex.Pattern;
  * 未命中模板（动作本身即完整命令，如 intercept 类模型的 un-intercept）→ 原样返回。
  * mesh-service 模型 = rollbackActions [recover, clean] 各展开一条。
  * 纯 Java，无 IntelliJ 依赖。
+ * <p>
+ * TODO(P2): 尚未接线到 Action 流程——回滚仍由 ProjectRollbackAction 按备份文件还原；
+ * 待 rollback 命令通道（UI 触发 + 进程管理）落地后接入。
  */
 public class RollbackPlanner {
 

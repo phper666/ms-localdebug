@@ -10,6 +10,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -65,6 +66,8 @@ class ConfigManagerTest {
         assertEquals("{broken json!!", corruptedContent, "损坏文件不应被加载覆盖");
 
         cm.saveConfig(); // 应拒绝覆盖写入
+        boolean refused = cm.saveConfig();
+        assertFalse(refused, "损坏文件时 saveConfig 应返回 false（调用方需感知，不再静默）");
         String afterSave = FileUtil.readUtf8String(configPath.toFile());
         assertEquals(corruptedContent, afterSave, "损坏配置文件不应被默认配置覆盖");
     }

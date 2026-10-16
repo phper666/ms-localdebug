@@ -33,6 +33,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.function.Consumer;
+import java.util.regex.Matcher;
 
 import static com.localdebug.plugin.core.constant.Constants.DEFAULT_DUBBO_PORT;
 import static com.localdebug.plugin.core.constant.Constants.QUERY_APPLICATION_YAML;
@@ -47,6 +48,7 @@ public class ProjectReplaceAction implements Action {
 
     private final DescriptorLoader descriptorLoader = new DescriptorLoader();
     private final DescriptorValidator descriptorValidator = new DescriptorValidator();
+    /** 单次执行内赋值/使用，非线程安全（Action 实例每次执行新建） */
     private StackDescriptor descriptor;
 
     /**
@@ -66,11 +68,16 @@ public class ProjectReplaceAction implements Action {
             return;
         }
 
-        // 加载并校验栈描述符（描述符错误 = 新式静默失败，必须早暴露）
-        this.descriptor = descriptorLoader.load(null);
-        List<String> descViolations = descriptorValidator.validate(descriptor);
-        if (!descViolations.isEmpty()) {
-            LogOutputUtil.error(logger, "栈描述符校验失败: " + String.join("; ", descViolations));
+        // 加载并校验栈描述符（描述符错误 = 新式静默失败，必须早暴露；加载异常统一转 IllegalArgumentException）
+        try {
+            this.descriptor = descriptorLoader.load(null);
+            List<String> descViolations = descriptorValidator.validate(descriptor);
+            if (!descViolations.isEmpty()) {
+                LogOutputUtil.error(logger, "栈描述符校验失败: " + String.join("; ", descViolations));
+                return;
+            }
+        } catch (RuntimeException e) {
+            LogOutputUtil.error(logger, "栈描述符加载失败: " + e.getMessage());
             return;
         }
 
@@ -196,13 +203,18 @@ public class ProjectReplaceAction implements Action {
             if (ObjectUtil.isEmpty(applicationConfig)) {
                 continue;
             }
-            // roleArn 可选：缺失时跳过占位符替换，避免 replaceAll 空值 NPE
-            if (ObjectUtil.isEmpty(aliYunConfig.getRamRole())) {
-                log.warn("ramRole 未配置，跳过 ${mainServiceRamRoleName} 占位符替换");
-                return applicationConfig;
-            }
+            // H2：配置文本含 ${mainServiceRamRoleName} 但未配置 ramRole → 报错退出，不再写占位符字面量进 yaml
             // TODO(P2): M5 占位符表数据化——${mainServiceRamRoleName} 替换仍为硬编码，待 middleware patches 挂 requires 声明后收编
-            return applicationConfig.replaceAll("\\$\\{mainServiceRamRoleName\\}", aliYunConfig.getRamRole());
+            if (applicationConfig.contains("${mainServiceRamRoleName}")) {
+                if (ObjectUtil.isEmpty(aliYunConfig.getRamRole())) {
+                    throw new IllegalStateException("nacos 配置 [" + replaceConfig.getNacosDataId()
+                            + "] 含 ${mainServiceRamRoleName} 占位符，但未配置 ramRole，请先在设置页填写");
+                }
+                // L1：ramRole 可能含 $ / \ 等特殊字符，用 quoteReplacement 防非法分组引用
+                return applicationConfig.replaceAll("\\$\\{mainServiceRamRoleName\\}",
+                        Matcher.quoteReplacement(aliYunConfig.getRamRole()));
+            }
+            return applicationConfig;
         }
         return null;
     }
@@ -242,6 +254,9 @@ public class ProjectReplaceAction implements Action {
         String k8sServiceName = ObjectUtil.isEmpty(rc.getK8sServiceName()) ? "<请填写服务名>" : rc.getK8sServiceName();
         String k8sServiceNamespace = ObjectUtil.isEmpty(rc.getK8sServiceNamespace()) ? "<请填写服务命名空间>" : rc.getK8sServiceNamespace();
         String alias = k8sServiceName + "-" + rc.getTag();
+        // M7：rpcPort 与 init 侧同源（routingEnabler.forcedRpcPort，缺省 DEFAULT_DUBBO_PORT）
+        Integer forcedRpcPort = desc.getRoutingEnabler() != null ? desc.getRoutingEnabler().getForcedRpcPort() : null;
+        int rpcPort = forcedRpcPort != null ? forcedRpcPort : DEFAULT_DUBBO_PORT;
         if (Constants.BFF.equals(rc.getServiceType())) {
             lines.add("# proxy http request, ktctl mesh <目标服务名> --expose <本地端口>:<目标服务端口>");
             lines.add("##接口流量拦截代理###" + rc.getAppName());
@@ -256,12 +271,12 @@ public class ProjectReplaceAction implements Action {
             // BFF的服务有可能跟rpc服务在同一个项目
             lines.add("# proxy rpc request, ktctl preview <新建服务名> --expose <本地端口>:<新建服务端口> ");
             lines.add("##rpc流量拦截代理###" + rc.getAppName());
-            lines.add(expandTemplate(templates, "preview", previewCtx(k8sServiceNamespace, alias)));
+            lines.add(expandTemplate(templates, "preview", previewCtx(k8sServiceNamespace, alias, rpcPort)));
             lines.add(newLine);
         } else if (Constants.RPC.equals(rc.getServiceType())) {
             lines.add("# proxy rpc request, ktctl preview <新建服务名> --expose <本地端口>:<新建服务端口> ");
             lines.add("##rpc流量拦截代理###" + rc.getAppName());
-            lines.add(expandTemplate(templates, "preview", previewCtx(k8sServiceNamespace, alias)));
+            lines.add(expandTemplate(templates, "preview", previewCtx(k8sServiceNamespace, alias, rpcPort)));
             lines.add(newLine);
         }
         lines.add("# ktctl -d -n [命名空间] recover [服务名]");
@@ -280,11 +295,11 @@ public class ProjectReplaceAction implements Action {
         return lines;
     }
 
-    private static Map<String, Object> previewCtx(String k8sServiceNamespace, String alias) {
+    private static Map<String, Object> previewCtx(String k8sServiceNamespace, String alias, int rpcPort) {
         Map<String, Object> ctx = new HashMap<>();
         ctx.put("ns", k8sServiceNamespace);
         ctx.put("alias", alias);
-        ctx.put("rpcPort", DEFAULT_DUBBO_PORT);
+        ctx.put("rpcPort", rpcPort);
         return ctx;
     }
 

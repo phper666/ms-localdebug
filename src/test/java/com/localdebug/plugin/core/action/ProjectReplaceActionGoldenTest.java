@@ -119,7 +119,9 @@ class ProjectReplaceActionGoldenTest {
     }
 
     @Test
-    void golden_jvmrc_mqEmpty_skipsMqVariants() {
+    void jvmrc_mqEmpty_skipsMqVariants_newBehaviorNotRegression() {
+        // 注意：非回归用例。此状态在改造前不可达（isValidConfig 拒绝 mqAddr 空），
+        // 断言的是 P0 分级校验放宽后的新行为：mqAddr 空时 nonProxyHosts 跳过 mq 变体。
         ALiYunConfig aliYunConfig = new ALiYunConfig();
         aliYunConfig.setNacosServerAddr("http://nacos.local:8848");
         // mqAddr 未配置

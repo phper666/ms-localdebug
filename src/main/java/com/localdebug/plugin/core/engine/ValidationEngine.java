@@ -21,7 +21,8 @@ import java.util.Map;
  *   <li>字段校验（确定性错误）：validation.required 缺失 → missingRequired（fail-fast，带字段名）</li>
  *   <li>前提确认（概率性错误）：precheckEntries → 只做前提清单（audit 文件用），不报「已通过」</li>
  * </ul>
- * 强制不变式：forced=mqIndependentGroup 恒校验（影子实例抢 dev MQ 消息是安全问题）。
+ * 强制不变式：validation.forced=mqIndependentGroup 或 safety.forceIndependentMqGroup=true 恒校验
+ * （影子实例抢 dev MQ 消息是安全问题）。
  * <p>
  * ConfigSnapshot = 简单占位符→值映射（Map&lt;String,Object&gt;，值 null/空 = 缺）。
  * profiles / enabledPatchGroups 本批保留签名占位（批次 2 依据 profile 引用 patches 求所需字段集合时启用）。
@@ -31,8 +32,8 @@ public class ValidationEngine {
 
     /** mq 独立消费组强制项名称（与内置栈 validation.forced 一致） */
     public static final String FORCED_MQ_INDEPENDENT_GROUP = "mqIndependentGroup";
-    /** mqIndependentGroup 的证据键：ConfigSnapshot 中为 true 表示已存在独立消费组 */
-    public static final String SNAPSHOT_KEY_MQ_CONSUMER_GROUP_ISOLATED = "mqConsumerGroupIsolated";
+    /** mqIndependentGroup 的证据键：ConfigSnapshot 中为 true 表示已配置 MQ 消费者列表 */
+    public static final String SNAPSHOT_KEY_MQ_CONSUMERS_CONFIGURED = "mqConsumersConfigured";
 
     /**
      * 执行校验
@@ -45,12 +46,12 @@ public class ValidationEngine {
     public ValidationResult check(StackDescriptor desc, Map<String, Object> configSnapshot,
                                   List<DebugProfile> profiles, List<String> enabledPatchGroups) {
         ValidationResult result = new ValidationResult();
-        if (desc == null || desc.getValidation() == null) {
+        if (desc == null) {
             return result;
         }
 
         // required 字段逐一查快照
-        List<String> required = desc.getValidation().getRequired();
+        List<String> required = desc.getValidation() != null ? desc.getValidation().getRequired() : null;
         if (required != null) {
             for (String field : required) {
                 if (isMissing(configSnapshot, field)) {
@@ -59,13 +60,14 @@ public class ValidationEngine {
             }
         }
 
-        // 强制不变式：mqIndependentGroup
-        List<String> forced = desc.getValidation().getForced();
-        if (forced != null && forced.contains(FORCED_MQ_INDEPENDENT_GROUP)
-                && !Boolean.TRUE.equals(configSnapshot.get(SNAPSHOT_KEY_MQ_CONSUMER_GROUP_ISOLATED))) {
-            result.getForcedViolations().add("强制项 " + FORCED_MQ_INDEPENDENT_GROUP
-                    + "：未检测到独立 MQ consumer group 证据（需 ConfigSnapshot["
-                    + SNAPSHOT_KEY_MQ_CONSUMER_GROUP_ISOLATED + "]=true，或 middleware patches 中 consumers 来自独立 group）");
+        // 强制不变式：mqIndependentGroup（validation.forced 与 safety.forceIndependentMqGroup 取或，防死字段）
+        List<String> forced = desc.getValidation() != null ? desc.getValidation().getForced() : null;
+        boolean forcedByValidation = forced != null && forced.contains(FORCED_MQ_INDEPENDENT_GROUP);
+        boolean forcedBySafety = desc.getSafety() != null
+                && Boolean.TRUE.equals(desc.getSafety().getForceIndependentMqGroup());
+        if ((forcedByValidation || forcedBySafety)
+                && !Boolean.TRUE.equals(configSnapshot.get(SNAPSHOT_KEY_MQ_CONSUMERS_CONFIGURED))) {
+            result.getForcedViolations().add("MQ 消费者列表未配置（独立消费组为强制项，请确认消费组与 dev 隔离）");
         }
 
         // precheck：routingEnabler.requiredOrgComponents + validation.precheck（支持点路径引用展开，去重保序）
@@ -73,7 +75,7 @@ public class ValidationEngine {
         if (desc.getRoutingEnabler() != null && desc.getRoutingEnabler().getRequiredOrgComponents() != null) {
             precheck.addAll(desc.getRoutingEnabler().getRequiredOrgComponents());
         }
-        List<String> precheckRefs = desc.getValidation().getPrecheck();
+        List<String> precheckRefs = desc.getValidation() != null ? desc.getValidation().getPrecheck() : null;
         if (precheckRefs != null) {
             for (String ref : precheckRefs) {
                 List<String> resolved = resolveListRef(ref, desc);
