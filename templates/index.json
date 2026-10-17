@@ -3,7 +3,7 @@
     {
       "name": "sca-dubbo-ktctl",
       "displayName": "Spring Cloud Alibaba + Dubbo + kt-connect（默认栈）",
-      "url": "https://raw.githubusercontent.com/phper666/ms-localdebug/main/templates/sca-dubbo-ktctl.json"
+      "url": "https://cdn.jsdelivr.net/gh/phper666/ms-localdebug@main/templates/sca-dubbo-ktctl.json"
     }
   ]
 }
