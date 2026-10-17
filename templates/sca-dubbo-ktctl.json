@@ -1,0 +1,186 @@
+{
+  "stack": "sca-dubbo-ktctl",
+  "displayName": "Spring Cloud Alibaba + Dubbo + kt-connect（默认栈）",
+  "schemaVersion": 1,
+  "configCenter": {
+    "type": "nacos",
+    "fallbackDataIdSuffix": ".yaml"
+  },
+  "registryPatch": {
+    "discoveryIpKey": "spring.cloud.nacos.discovery.ip",
+    "discoveryPortKey": "spring.cloud.nacos.discovery.port",
+    "discoveryIpTemplate": "{svc}.{ns}.svc.cluster.local",
+    "discoveryPortValue": 80,
+    "appNameTemplate": "{app}-{tag}",
+    "bootstrapPatch": {
+      "spring.cloud.nacos.config.server-addr": "{configCenterAddr}",
+      "spring.application.name": "application-localdebug"
+    },
+    "importCheckKey": "spring.cloud.nacos.config.import-check.enabled",
+    "importCheckValue": false,
+    "extraApplicationPatch": {
+      "dubbo.provider.tag": "{tag}",
+      "dubbo.consumer.lazy": true,
+      "dubbo.registry.register-mode": "all",
+      "dubbo.protocol.port": "{rpcPort}",
+      "management": null,
+      "server.port": ""
+    }
+  },
+  "routingEnabler": {
+    "mode": "provider-tag",
+    "httpLaneHeader": "tag",
+    "rpcAttachmentKey": "dubbo.tag",
+    "rpcProviderTagKey": "dubbo.provider.tag",
+    "shadowNameTemplate": "{svc}-{tag}",
+    "forcedRpcPort": 20880,
+    "rpcRegistryEnvVar": "DUBBO_IP_TO_REGISTRY",
+    "rpcRegistryIpTemplate": "{svc}-{tag}.{ns}.svc.cluster.local",
+    "nonProxyHostsSources": [
+      "{configCenterAddr}",
+      "{mqAddr}"
+    ],
+    "requiredOrgComponents": [
+      "网关按 header 'tag' 改写 lb 目标到影子服务（LocalRouteForward 类组件）",
+      "消费侧已透传 attachment 'dubbo.tag'（如 platform-common 的 DubboTagClusterInterceptor）",
+      "dev 集群 DNS 可达（隧道工具建 {svc}-{tag} Service）"
+    ]
+  },
+  "proxyModel": "mesh-service",
+  "proxy": {
+    "tool": "ktctl",
+    "templates": {
+      "connect": "ktctl -d -n {ns} connect",
+      "mesh": "ktctl -d -n {ns} mesh {svc} --expose {port}:8080 --versionMark tag:{tag}",
+      "preview": "ktctl -d -n {ns} preview {alias} --expose {rpcPort}:{rpcPort}",
+      "recover": "ktctl -d -n {ns} recover {svc} ",
+      "clean": "ktctl -d -n {ns} clean "
+    },
+    "stopMechanism": "signal-file",
+    "rollbackActions": [
+      "recover",
+      "clean"
+    ]
+  },
+  "bootIsolation": {
+    "nacos": {
+      "renameApp": "application-localdebug",
+      "disableImportCheck": true
+    }
+  },
+  "runtimeEnv": "k8s",
+  "credentials": [
+    {
+      "provider": "aliyun-sts",
+      "required": false,
+      "ttlSeconds": 28800
+    }
+  ],
+  "validation": {
+    "required": [
+      "configCenterAddr"
+    ],
+    "optional": [
+      "mqAddr",
+      "roleArn",
+      "schedulerNamespace",
+      "schedulerGroupId",
+      "schedulerAppKey"
+    ],
+    "precheck": [
+      "routingEnabler.requiredOrgComponents"
+    ],
+    "forced": [
+      "mqIndependentGroup"
+    ]
+  },
+  "configTextReplacements": {
+    "${mainServiceRamRoleName}": "ramRole"
+  },
+  "contextSources": {
+    "mqAddr": "section:mqAddr",
+    "roleArn": "section:roleArn",
+    "accessKey": "secret:accessKey",
+    "secretKey": "secret:secretKey",
+    "schedulerNamespace": "section:schedulerNamespace",
+    "schedulerGroupId": "section:schedulerGroupId",
+    "schedulerAppKey": "section:schedulerAppKey",
+    "stsAccessKey": "credential:accessKey",
+    "stsSecretKey": "credential:secretKey",
+    "stsSecurityToken": "credential:token"
+  },
+  "middlewareGroup": {
+    "key": "churchill",
+    "mqConsumersKey": "churchill.rocketmq.default-config",
+    "producersKey": "churchill.rocketmq.producers"
+  },
+  "safety": {
+    "forceIndependentMqGroup": true
+  },
+  "formFields": [
+    {
+      "key": "configCenterAddr",
+      "label": "Nacos 地址（必填）",
+      "required": true,
+      "help": "本地能访问的 Nacos 地址；示例：mse-xxx.mse.aliyuncs.com:8848（dev 公网）；内网环境填内网地址",
+      "secret": false
+    },
+    {
+      "key": "mqAddr",
+      "label": "RocketMQ 地址",
+      "required": false,
+      "help": "dev 的 MQ 公网接入点，示例：http://MQ_INST_xxx.cn-hangzhou.mq.aliyuncs.com ；不用 MQ 可留空",
+      "secret": false
+    },
+    {
+      "key": "roleArn",
+      "label": "RAM 角色 ARN",
+      "required": false,
+      "help": "找运维/管理员获取，示例：acs:ram::1234567890:role/your-role ；用于换 STS 临时凭证，不用可留空",
+      "secret": false
+    },
+    {
+      "key": "schedulerNamespace",
+      "label": "SchedulerX 命名空间",
+      "required": false,
+      "help": "SchedulerX 控制台可查；仅本地调试定时任务时需要",
+      "secret": false
+    },
+    {
+      "key": "schedulerGroupId",
+      "label": "SchedulerX 分组 ID",
+      "required": false,
+      "help": "SchedulerX 控制台可查；仅本地调试定时任务时需要",
+      "secret": false
+    },
+    {
+      "key": "schedulerAppKey",
+      "label": "SchedulerX 应用 Key",
+      "required": false,
+      "help": "SchedulerX 控制台可查；仅本地调试定时任务时需要",
+      "secret": false
+    },
+    {
+      "key": "accessKey",
+      "label": "AccessKey（个人）",
+      "required": false,
+      "secret": true,
+      "help": "个人账号 AK（找管理员开通/控制台生成）；仅存本机 PasswordSafe，不落明文"
+    },
+    {
+      "key": "secretKey",
+      "label": "SecretKey（个人）",
+      "required": false,
+      "secret": true,
+      "help": "与 AccessKey 配对；仅存本机 PasswordSafe，不落明文"
+    },
+    {
+      "key": "tag",
+      "label": "调试 tag",
+      "required": false,
+      "help": "流量染色的个人标识（默认取本机用户名）；每项目在「项目配置」里设置，此处仅提示不落盘",
+      "secret": false,
+      "default": "{username}"
+    }
+  ]
+}
